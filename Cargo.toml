@@ -1,0 +1,18 @@
+[package]
+name = "experimental"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embassy-nxp = { version = "0.1.0", path = "../embassy-opensource/embassy/embassy-nxp", features = ["lpc55", "rt", "defmt"] }
+embassy-executor = { version = "0.8.0", path = "../embassy-opensource/embassy/embassy-executor", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-sync = { version = "0.7.0", path = "../embassy-opensource/embassy/embassy-sync", features = ["defmt"] }
+embassy-time = { version = "0.4.0", path = "../embassy-opensource/embassy/embassy-time", features = ["defmt"] }
+panic-halt = "1.0.0"
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = { version = "0.7.0"}
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+panic-semihosting = "0.6.0"
+lpc55-pac = "0.5.0"

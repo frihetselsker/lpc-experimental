@@ -7,6 +7,7 @@ use core::marker::PhantomData;
 use core::task::Poll;
 
 use cortex_m::asm::nop;
+use cortex_m::peripheral;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
@@ -120,7 +121,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            baudrate: 9600,
+            baudrate: 200,
             data_bits: DataBits::DataBits8,
             stop_bits: StopBits::STOP1,
             parity: Parity::ParityNone,
@@ -192,15 +193,15 @@ fn init(config: Config) {
 
     // Depends on the oversampling rate, for this example 16x oversampling is used
     let source_clock = match config.baudrate {
-        750_001..=6000000 => {
+        750_001..=6_000_000 => {
             syscon.fcclksel2().write(|w| w.sel().enum_0x3()); // 96 MHz
             96_000_000
         }
-        1501..=750_000 => {
+        1_501..=750_000 => {
             syscon.fcclksel2().write(|w| w.sel().enum_0x2()); // 12 MHz
             12_000_000
         }
-        121..=1500 => {
+        121..=1_500 => {
             syscon.fcclksel2().write(|w| w.sel().enum_0x4()); // 1 MHz
             1_000_000
         }
@@ -257,8 +258,11 @@ fn init(config: Config) {
     // Finally, final_clock =  raw_clock / (1 + MULT / DIV)
 
     // Baud rate setup
-    let brg_value = source_clock / (16 * config.baudrate);
+    let mut brg_value = source_clock / (16 * config.baudrate);
     info!("BRG Value {}", brg_value);
+    if brg_value >= 256 {
+        brg_value = 255;
+    }
     let raw_clock = source_clock / (16 * brg_value);
     info!("Raw clock {}", raw_clock);
     let mult_value: u32 = (raw_clock * 256 / config.baudrate) - 256;
@@ -335,7 +339,7 @@ fn init(config: Config) {
         .modify(|_, w| w.dmatx().disabled().dmarx().disabled());
 
     // USART Interrupts
-    usart.intenset.modify(|_, w| {
+    /* usart.intenset.modify(|_, w| {
         w.framerren()
             .set_bit()
             .parityerren()
@@ -344,24 +348,7 @@ fn init(config: Config) {
             .set_bit()
             .aberren()
             .set_bit()
-    });
-    // FIFO Interrupts
-    usart.fifointenset.modify(|_, w| {
-        w.txerr()
-            .enabled()
-            .rxerr()
-            .enabled()
-            .txlvl()
-            .enabled()
-            .rxlvl()
-            .disabled()
-    });
-    // Enable interrupts
-
-    unsafe {
-        interrupt::FLEXCOMM2.set_priority(Priority::from(3));
-        interrupt::FLEXCOMM2.enable();
-    }
+    });*/
 
     // Enable FIFO and USART
 
@@ -381,8 +368,46 @@ fn init(config: Config) {
         nop();
     }
 
-    while usart.fifostat.read().rxnotempty().bit_is_set() {
-        let _ = usart.fiford.read().bits();
+    blocking_write(&[
+        2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 23u8, 45u8, 12u8,
+    ]);
+
+    // usart.fifocfg.modify(|_, w| {
+    //     w.emptytx()
+    //         .set_bit()
+    //         .emptyrx()
+    //         .set_bit()
+    //         .emptytx()
+    //         .clear_bit()
+    //         .emptyrx()
+    //         .clear_bit()
+    // });
+
+    // FIFO Interrupts
+    usart.fifointenset.modify(|_, w| {
+        w.txerr()
+            .disabled()
+            .rxerr()
+            .disabled()
+            .txlvl()
+            .enabled()
+            .rxlvl()
+            .disabled()
+    });
+    // Enable interrupts
+    usart.fifotrig.modify(|_, w| unsafe {
+        w.txlvl()
+            .bits(1)
+            .txlvlena()
+            .enabled()
+            .rxlvl()
+            .bits(15)
+            .rxlvlena()
+            .disabled()
+    });
+    unsafe {
+        interrupt::FLEXCOMM2.set_priority(Priority::from(3));
+        interrupt::FLEXCOMM2.enable();
     }
 }
 
@@ -455,8 +480,36 @@ fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
 #[cortex_m_rt::interrupt]
 fn FLEXCOMM2() {
     let usart = unsafe { &*USART2::ptr() };
+    let tx_level = usart.fifostat.read().txlvl().bits();
+    let rx_level = usart.fifostat.read().rxlvl().bits();
+
+    let tx_error = usart.fifostat.read().txerr().bit_is_set();
+    let rx_error = usart.fifostat.read().rxerr().bit_is_set();
+    let peripheral_error = usart.fifostat.read().perint().bit_is_set();
+
+    let tx_empty = usart.fifostat.read().txempty().bit_is_set();
+    let tx_not_full = usart.fifostat.read().txnotfull().bit_is_set();
+    let rx_not_empty = usart.fifostat.read().rxnotempty().bit_is_set();
+    let rx_full = usart.fifostat.read().rxfull().bit_is_set();
+
     info!("On interrupt");
-    usart.intstat.into()
+
+    info!("TX FIFO {}", tx_level);
+    info!("RX FIFO {}", rx_level);
+
+    info!("Errors: ");
+    info!("TX Error raised: {}", tx_error);
+    info!("RX Error raised: {}", rx_error);
+    info!("Peripheral error raised: {}", peripheral_error);
+
+    info!("Other flags:");
+    info!("TX Empty raised: {}", tx_empty);
+    info!("TX not full raised: {}", tx_not_full);
+    info!("RX not empty raised: {}", rx_not_empty);
+    info!("RX full raised: {}", rx_full);
+    for _ in 0..1_000_000 {
+        nop();
+    }
 }
 
 #[embassy_executor::main]
@@ -478,7 +531,7 @@ async fn main(_spawner: Spawner) {
             nop();
         }
 
-        let mut rx = [0u8; 10];
+        /*let mut rx = [0u8; 10];
         match blocking_read(&mut rx) {
             Ok(_) => info!("The data was read successully"),
             Err(e) => info!("Error {:?}", e),
@@ -486,7 +539,7 @@ async fn main(_spawner: Spawner) {
         match core::str::from_utf8_mut(&mut rx) {
             Ok(s) => info!("The message: {}", s),
             Err(_e) => info!("UTF8 Error"),
-        }
+        }*/
 
         for _ in 0..250_000 {
             nop();

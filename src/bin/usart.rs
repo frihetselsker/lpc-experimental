@@ -1,10 +1,19 @@
 #![no_std]
 #![no_main]
 
+use core::any::Any;
+use core::future::poll_fn;
+use core::marker::PhantomData;
+use core::task::Poll;
+
 use cortex_m::asm::nop;
 use defmt::*;
 use embassy_executor::Spawner;
-use lpc55_pac::*;
+use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
+use embassy_hal_internal::interrupt::{InterruptExt, Priority};
+use embassy_sync::waitqueue::AtomicWaker;
+use lpc55_pac::{interrupt, FLEXCOMM2, IOCON, SYSCON, USART2};
+use portable_atomic::AtomicU8;
 use {defmt_rtt as _, panic_halt as _};
 
 /// Serial error
@@ -118,6 +127,42 @@ impl Default for Config {
             invert_rx: false,
             invert_tx: false,
         }
+    }
+}
+
+pub struct State {
+    tx_waker: AtomicWaker,
+    tx_buf: RingBuffer,
+    rx_waker: AtomicWaker,
+    rx_buf: RingBuffer,
+    rx_error: AtomicU8,
+}
+
+impl State {
+    pub const fn new() -> Self {
+        Self {
+            rx_buf: RingBuffer::new(),
+            tx_buf: RingBuffer::new(),
+            rx_waker: AtomicWaker::new(),
+            tx_waker: AtomicWaker::new(),
+            rx_error: AtomicU8::new(0),
+        }
+    }
+}
+
+pub fn init_buffers<'d>(
+    state: &State,
+    tx_buffer: Option<&'d mut [u8]>,
+    rx_buffer: Option<&'d mut [u8]>,
+) {
+    if let Some(tx_buffer) = tx_buffer {
+        let len = tx_buffer.len();
+        unsafe { state.tx_buf.init(tx_buffer.as_mut_ptr(), len) };
+    }
+
+    if let Some(rx_buffer) = rx_buffer {
+        let len = rx_buffer.len();
+        unsafe { state.rx_buf.init(rx_buffer.as_mut_ptr(), len) };
     }
 }
 
@@ -290,16 +335,33 @@ fn init(config: Config) {
         .modify(|_, w| w.dmatx().disabled().dmarx().disabled());
 
     // USART Interrupts
-
+    usart.intenset.modify(|_, w| {
+        w.framerren()
+            .set_bit()
+            .parityerren()
+            .set_bit()
+            .rxnoiseen()
+            .set_bit()
+            .aberren()
+            .set_bit()
+    });
     // FIFO Interrupts
-
+    usart.fifointenset.modify(|_, w| {
+        w.txerr()
+            .enabled()
+            .rxerr()
+            .enabled()
+            .txlvl()
+            .enabled()
+            .rxlvl()
+            .disabled()
+    });
     // Enable interrupts
 
-    /* Cortex Interrupts enabling
-    let mut cp = cortex_m::peripheral::Peripherals::take().unwrap();
-    unsafe { cp.NVIC.set_priority(interrupt::FLEXCOMM0, 3) };
-    unsafe { cortex_m::peripheral::NVIC::unmask(interrupt::FLEXCOMM0) };
-    */
+    unsafe {
+        interrupt::FLEXCOMM2.set_priority(Priority::from(3));
+        interrupt::FLEXCOMM2.enable();
+    }
 
     // Enable FIFO and USART
 
@@ -388,6 +450,13 @@ fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
         *b = dr;
     }
     Ok(buffer.len())
+}
+
+#[cortex_m_rt::interrupt]
+fn FLEXCOMM2() {
+    let usart = unsafe { &*USART2::ptr() };
+    info!("On interrupt");
+    usart.intstat.into()
 }
 
 #[embassy_executor::main]

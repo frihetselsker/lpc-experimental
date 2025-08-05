@@ -16,3 +16,5 @@ defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 panic-semihosting = "0.6.0"
 lpc55-pac = "0.5.0"
+embassy-hal-internal = { version = "0.3.0", path = "../embassy-opensource/embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
+portable-atomic = "1.11.1"

@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::any::Any;
-use core::future::poll_fn;
+use core::future::{poll_fn, Future};
 use core::marker::PhantomData;
 use core::task::Poll;
 
@@ -13,6 +13,7 @@ use embassy_executor::Spawner;
 use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
 use embassy_hal_internal::interrupt::{InterruptExt, Priority};
 use embassy_sync::waitqueue::AtomicWaker;
+use lpc55_pac::usb0::INFO;
 use lpc55_pac::{interrupt, FLEXCOMM2, IOCON, SYSCON, USART2};
 use portable_atomic::AtomicU8;
 use {defmt_rtt as _, panic_halt as _};
@@ -123,7 +124,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            baudrate: 9600,
+            baudrate: 5000,
             data_bits: DataBits::DataBits8,
             stop_bits: StopBits::STOP1,
             parity: Parity::ParityNone,
@@ -389,11 +390,11 @@ fn init(config: Config) {
     critical_section::with(|_cs| {
         usart.fifotrig.modify(|_, w| unsafe {
             w.txlvl()
-                .bits(1)
+                .bits(2)
                 .txlvlena()
                 .disabled()
                 .rxlvl()
-                .bits(1)
+                .bits(2)
                 .rxlvlena()
                 .disabled()
         });
@@ -405,7 +406,7 @@ fn init(config: Config) {
                 .txlvl()
                 .disabled()
                 .rxlvl()
-                .enabled()
+                .disabled()
         });
         // Enable interrupts
 
@@ -428,7 +429,7 @@ fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
         let data = usart.fifostat.read().txlvl().bits();
         info!("TX FIFO: {}", data);
     }
-    // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit().txlvl().clear_bit());
+    // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
     Ok(())
 }
 
@@ -450,6 +451,7 @@ fn busy() -> bool {
 fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
     let usart = unsafe { &*USART2::ptr() };
     usart.fifotrig.modify(|_, w| w.rxlvlena().enabled());
+    usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
     while !buffer.is_empty() {
         match drain_fifo(buffer) {
             Ok(0) => continue, // Wait for more data
@@ -458,6 +460,7 @@ fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
         }
     }
     usart.fifotrig.modify(|_, w| w.rxlvlena().disabled());
+    usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
     Ok(())
 }
 /// Returns Ok(len) if no errors occurred. Returns Err((len, err)) if an error was
@@ -465,6 +468,7 @@ fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
 /// `buffer`.
 fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
     let usart = unsafe { &*USART2::ptr() };
+    usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
     for (i, b) in buffer.iter_mut().enumerate() {
         let data = usart.fifostat.read().rxlvl().bits();
         info!("RX FIFO: {}", data);
@@ -522,7 +526,7 @@ fn FLEXCOMM2() {
     info!("RX not empty raised: {}", rx_not_empty);
     info!("RX full raised: {}", rx_full);
 
-    usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
+    usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
 
     for _ in 0..1_000_000 {
         nop();
@@ -532,37 +536,33 @@ fn FLEXCOMM2() {
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init(Config::default());
+    let usart = unsafe { &*USART2::ptr() };
     info!("Inside the main function");
+    let letter = b'a';
     loop {
-        let tx: &[u8; 10] = b"hello,geo!";
-        match blocking_write(tx) {
-            Ok(_) => {
-                info!("The data was sent successfully");
-            }
-            _ => {
-                crate::panic!("Error at TX");
-            }
+        info!("Started sending");
+        // usart.fifointenset.modify(|_, w| w.txlvl().enabled());
+        for i in 0..4 {
+            info!("Letter {}", i);
+            usart
+                .fifowr
+                .modify(|_, w| unsafe { w.txdata().bits(letter as u16) });
         }
+        // usart.fifocfg.modify(|_, w| w.emptyrx().set_bit());
 
-        for _ in 0..250_000 {
+        info!("Finished sending");
+        for _ in 0..200_000 {
             nop();
         }
-
-        blocking_flush().unwrap();
-
-        let mut rx = [0u8; 10];
-        match blocking_read(&mut rx) {
-            Ok(_) => info!("The data was read successully"),
-            Err(e) => info!("Error {:?}", e),
+        info!("Started reading");
+        usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
+        for i in 0..4 {
+            info!("Letter {}", i);
+            usart.fiford.read().bits();
         }
-        match core::str::from_utf8_mut(&mut rx) {
-            Ok(s) => info!("The message: {}", s),
-            Err(_e) => info!("UTF8 Error"),
-        }
-
-        info!("Inside the loop");
-
-        for _ in 0..250_000 {
+        usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
+        info!("Finished reading");
+        for _ in 0..1_000_000 {
             nop();
         }
     }

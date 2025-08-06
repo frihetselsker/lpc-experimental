@@ -17,6 +17,8 @@ use lpc55_pac::{interrupt, FLEXCOMM2, IOCON, SYSCON, USART2};
 use portable_atomic::AtomicU8;
 use {defmt_rtt as _, panic_halt as _};
 
+static COUNTER: AtomicU8 = AtomicU8::new(0);
+
 /// Serial error
 #[derive(Format, Debug, Eq, PartialEq, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -121,7 +123,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            baudrate: 200,
+            baudrate: 9600,
             data_bits: DataBits::DataBits8,
             stop_bits: StopBits::STOP1,
             parity: Parity::ParityNone,
@@ -368,9 +370,9 @@ fn init(config: Config) {
         nop();
     }
 
-    blocking_write(&[
-        2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 23u8, 45u8, 12u8,
-    ]);
+    // critical_section::with(|_cs| {
+    // blocking_write(&[2u8, 3u8, 4u8]).unwrap();
+    // });
 
     // usart.fifocfg.modify(|_, w| {
     //     w.emptytx()
@@ -384,36 +386,40 @@ fn init(config: Config) {
     // });
 
     // FIFO Interrupts
-    usart.fifointenset.modify(|_, w| {
-        w.txerr()
-            .disabled()
-            .rxerr()
-            .disabled()
-            .txlvl()
-            .enabled()
-            .rxlvl()
-            .disabled()
+    critical_section::with(|_cs| {
+        usart.fifotrig.modify(|_, w| unsafe {
+            w.txlvl()
+                .bits(1)
+                .txlvlena()
+                .disabled()
+                .rxlvl()
+                .bits(1)
+                .rxlvlena()
+                .disabled()
+        });
+        usart.fifointenset.modify(|_, w| {
+            w.txerr()
+                .enabled()
+                .rxerr()
+                .enabled()
+                .txlvl()
+                .disabled()
+                .rxlvl()
+                .enabled()
+        });
+        // Enable interrupts
+
+        unsafe {
+            interrupt::FLEXCOMM2.set_priority(Priority::from(3));
+            interrupt::FLEXCOMM2.enable();
+        }
     });
-    // Enable interrupts
-    usart.fifotrig.modify(|_, w| unsafe {
-        w.txlvl()
-            .bits(1)
-            .txlvlena()
-            .enabled()
-            .rxlvl()
-            .bits(15)
-            .rxlvlena()
-            .disabled()
-    });
-    unsafe {
-        interrupt::FLEXCOMM2.set_priority(Priority::from(3));
-        interrupt::FLEXCOMM2.enable();
-    }
 }
 
 /// Transmit the provided buffer blocking execution until done.
 fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
     let usart = unsafe { &*USART2::ptr() };
+    // usart.fifointenset.modify(|_, w| w.txlvl().enabled());
     for &b in buffer {
         while usart.fifostat.read().txnotfull().bit_is_clear() {}
         usart
@@ -422,6 +428,7 @@ fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
         let data = usart.fifostat.read().txlvl().bits();
         info!("TX FIFO: {}", data);
     }
+    // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit().txlvl().clear_bit());
     Ok(())
 }
 
@@ -442,6 +449,7 @@ fn busy() -> bool {
 
 fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
     let usart = unsafe { &*USART2::ptr() };
+    usart.fifotrig.modify(|_, w| w.rxlvlena().enabled());
     while !buffer.is_empty() {
         match drain_fifo(buffer) {
             Ok(0) => continue, // Wait for more data
@@ -449,6 +457,7 @@ fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
             Err((_, err)) => return Err(err),
         }
     }
+    usart.fifotrig.modify(|_, w| w.rxlvlena().disabled());
     Ok(())
 }
 /// Returns Ok(len) if no errors occurred. Returns Err((len, err)) if an error was
@@ -479,6 +488,7 @@ fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
 
 #[cortex_m_rt::interrupt]
 fn FLEXCOMM2() {
+    COUNTER.add(1, core::sync::atomic::Ordering::Relaxed);
     let usart = unsafe { &*USART2::ptr() };
     let tx_level = usart.fifostat.read().txlvl().bits();
     let rx_level = usart.fifostat.read().rxlvl().bits();
@@ -492,7 +502,11 @@ fn FLEXCOMM2() {
     let rx_not_empty = usart.fifostat.read().rxnotempty().bit_is_set();
     let rx_full = usart.fifostat.read().rxfull().bit_is_set();
 
-    info!("On interrupt");
+    warn!("On interrupt");
+    warn!(
+        "COUNTER: {}",
+        COUNTER.load(core::sync::atomic::Ordering::Relaxed)
+    );
 
     info!("TX FIFO {}", tx_level);
     info!("RX FIFO {}", rx_level);
@@ -507,6 +521,9 @@ fn FLEXCOMM2() {
     info!("TX not full raised: {}", tx_not_full);
     info!("RX not empty raised: {}", rx_not_empty);
     info!("RX full raised: {}", rx_full);
+
+    usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
+
     for _ in 0..1_000_000 {
         nop();
     }
@@ -531,7 +548,9 @@ async fn main(_spawner: Spawner) {
             nop();
         }
 
-        /*let mut rx = [0u8; 10];
+        blocking_flush().unwrap();
+
+        let mut rx = [0u8; 10];
         match blocking_read(&mut rx) {
             Ok(_) => info!("The data was read successully"),
             Err(e) => info!("Error {:?}", e),
@@ -539,7 +558,9 @@ async fn main(_spawner: Spawner) {
         match core::str::from_utf8_mut(&mut rx) {
             Ok(s) => info!("The message: {}", s),
             Err(_e) => info!("UTF8 Error"),
-        }*/
+        }
+
+        info!("Inside the loop");
 
         for _ in 0..250_000 {
             nop();

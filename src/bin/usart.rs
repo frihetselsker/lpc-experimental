@@ -7,13 +7,11 @@ use core::marker::PhantomData;
 use core::task::Poll;
 
 use cortex_m::asm::nop;
-use cortex_m::peripheral;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
 use embassy_hal_internal::interrupt::{InterruptExt, Priority};
 use embassy_sync::waitqueue::AtomicWaker;
-use lpc55_pac::usb0::INFO;
 use lpc55_pac::{interrupt, FLEXCOMM2, IOCON, SYSCON, USART2};
 use portable_atomic::AtomicU8;
 use {defmt_rtt as _, panic_halt as _};
@@ -390,13 +388,13 @@ fn init(config: Config) {
     critical_section::with(|_cs| {
         usart.fifotrig.modify(|_, w| unsafe {
             w.txlvl()
-                .bits(2)
+                .bits(3)
                 .txlvlena()
-                .disabled()
+                .enabled()
                 .rxlvl()
-                .bits(2)
+                .bits(3)
                 .rxlvlena()
-                .disabled()
+                .enabled()
         });
         usart.fifointenset.modify(|_, w| {
             w.txerr()
@@ -418,77 +416,77 @@ fn init(config: Config) {
 }
 
 /// Transmit the provided buffer blocking execution until done.
-fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
-    let usart = unsafe { &*USART2::ptr() };
-    // usart.fifointenset.modify(|_, w| w.txlvl().enabled());
-    for &b in buffer {
-        while usart.fifostat.read().txnotfull().bit_is_clear() {}
-        usart
-            .fifowr
-            .modify(|_, w| unsafe { w.txdata().bits(b as u16) });
-        let data = usart.fifostat.read().txlvl().bits();
-        info!("TX FIFO: {}", data);
-    }
-    // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
-    Ok(())
-}
+// fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
+//     let usart = unsafe { &*USART2::ptr() };
+//     usart.fifointenset.modify(|_, w| w.txlvl().enabled());
+//     for &b in buffer {
+//         while usart.fifostat.read().txnotfull().bit_is_clear() {}
+//         usart
+//             .fifowr
+//             .modify(|_, w| unsafe { w.txdata().bits(b as u16) });
+//         let data = usart.fifostat.read().txlvl().bits();
+//         info!("TX FIFO: {}", data);
+//     }
+//     // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
+//     Ok(())
+// }
 
-/// Flush UART TX blocking execution until done.
-fn blocking_flush() -> Result<(), Error> {
-    let usart = unsafe { &*USART2::ptr() };
-    while usart.fifostat.read().txempty().bit_is_clear() {}
-    Ok(())
-}
+// /// Flush UART TX blocking execution until done.
+// fn blocking_flush() -> Result<(), Error> {
+//     let usart = unsafe { &*USART2::ptr() };
+//     while usart.fifostat.read().txempty().bit_is_clear() {}
+//     Ok(())
+// }
 
-/// Check if UART is busy transmitting.
-fn busy() -> bool {
-    let usart = unsafe { &*USART2::ptr() };
-    usart.fifostat.read().txempty().bit_is_clear()
-}
+// /// Check if UART is busy transmitting.
+// fn busy() -> bool {
+//     let usart = unsafe { &*USART2::ptr() };
+//     usart.fifostat.read().txempty().bit_is_clear()
+// }
 
-/// Read from UART RX blocking execution until done.
+// /// Read from UART RX blocking execution until done.
 
-fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
-    let usart = unsafe { &*USART2::ptr() };
-    usart.fifotrig.modify(|_, w| w.rxlvlena().enabled());
-    usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
-    while !buffer.is_empty() {
-        match drain_fifo(buffer) {
-            Ok(0) => continue, // Wait for more data
-            Ok(n) => buffer = &mut buffer[n..],
-            Err((_, err)) => return Err(err),
-        }
-    }
-    usart.fifotrig.modify(|_, w| w.rxlvlena().disabled());
-    usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
-    Ok(())
-}
-/// Returns Ok(len) if no errors occurred. Returns Err((len, err)) if an error was
-/// encountered. in both cases, `len` is the number of *good* bytes copied into
-/// `buffer`.
-fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
-    let usart = unsafe { &*USART2::ptr() };
-    usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
-    for (i, b) in buffer.iter_mut().enumerate() {
-        let data = usart.fifostat.read().rxlvl().bits();
-        info!("RX FIFO: {}", data);
-        while usart.fifostat.read().rxnotempty().bit_is_clear() {}
+// fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
+//     let usart = unsafe { &*USART2::ptr() };
+//     usart.fifotrig.modify(|_, w| w.rxlvlena().enabled());
+//     usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
+//     while !buffer.is_empty() {
+//         match drain_fifo(buffer) {
+//             Ok(0) => continue, // Wait for more data
+//             Ok(n) => buffer = &mut buffer[n..],
+//             Err((_, err)) => return Err(err),
+//         }
+//     }
+//     usart.fifotrig.modify(|_, w| w.rxlvlena().disabled());
+//     usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
+//     Ok(())
+// }
+// /// Returns Ok(len) if no errors occurred. Returns Err((len, err)) if an error was
+// /// encountered. in both cases, `len` is the number of *good* bytes copied into
+// /// `buffer`.
+// fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
+//     let usart = unsafe { &*USART2::ptr() };
+//     usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
+//     for (i, b) in buffer.iter_mut().enumerate() {
+//         let data = usart.fifostat.read().rxlvl().bits();
+//         info!("RX FIFO: {}", data);
+//         while usart.fifostat.read().rxnotempty().bit_is_clear() {}
 
-        if usart.fifostat.read().rxerr().bit_is_set() {
-            return Err((i, Error::Overrun));
-        } else if usart.fifordnopop.read().parityerr().bit_is_set() {
-            return Err((i, Error::Parity));
-        } else if usart.fifordnopop.read().framerr().bit_is_set() {
-            return Err((i, Error::Framing));
-        } else if usart.fifordnopop.read().rxnoise().bit_is_set() {
-            return Err((i, Error::Noise));
-        }
+//         if usart.fifostat.read().rxerr().bit_is_set() {
+//             return Err((i, Error::Overrun));
+//         } else if usart.fifordnopop.read().parityerr().bit_is_set() {
+//             return Err((i, Error::Parity));
+//         } else if usart.fifordnopop.read().framerr().bit_is_set() {
+//             return Err((i, Error::Framing));
+//         } else if usart.fifordnopop.read().rxnoise().bit_is_set() {
+//             return Err((i, Error::Noise));
+//         }
 
-        let dr = usart.fiford.read().bits() as u8;
-        *b = dr;
-    }
-    Ok(buffer.len())
-}
+//         let dr = usart.fiford.read().bits() as u8;
+//         *b = dr;
+//     }
+//     Ok(buffer.len())
+// }
 
 #[cortex_m_rt::interrupt]
 fn FLEXCOMM2() {
@@ -501,10 +499,10 @@ fn FLEXCOMM2() {
     let rx_error = usart.fifostat.read().rxerr().bit_is_set();
     let peripheral_error = usart.fifostat.read().perint().bit_is_set();
 
-    let tx_empty = usart.fifostat.read().txempty().bit_is_set();
-    let tx_not_full = usart.fifostat.read().txnotfull().bit_is_set();
-    let rx_not_empty = usart.fifostat.read().rxnotempty().bit_is_set();
-    let rx_full = usart.fifostat.read().rxfull().bit_is_set();
+    // let tx_empty = usart.fifostat.read().txempty().bit_is_set();
+    // let tx_not_full = usart.fifostat.read().txnotfull().bit_is_set();
+    // let rx_not_empty = usart.fifostat.read().rxnotempty().bit_is_set();
+    // let rx_full = usart.fifostat.read().rxfull().bit_is_set();
 
     warn!("On interrupt");
     warn!(
@@ -520,13 +518,15 @@ fn FLEXCOMM2() {
     info!("RX Error raised: {}", rx_error);
     info!("Peripheral error raised: {}", peripheral_error);
 
-    info!("Other flags:");
-    info!("TX Empty raised: {}", tx_empty);
-    info!("TX not full raised: {}", tx_not_full);
-    info!("RX not empty raised: {}", rx_not_empty);
-    info!("RX full raised: {}", rx_full);
+    // info!("other flags:");
+    // info!("tx empty raised: {}", tx_empty);
+    // info!("tx not full raised: {}", tx_not_full);
+    // info!("rx not empty raised: {}", rx_not_empty);
+    // info!("rx full raised: {}", rx_full);
 
-    usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
+    usart
+        .fifointenclr
+        .modify(|_, w| w.txlvl().set_bit().rxlvl().set_bit());
 
     for _ in 0..1_000_000 {
         nop();
@@ -537,16 +537,23 @@ fn FLEXCOMM2() {
 async fn main(_spawner: Spawner) {
     init(Config::default());
     let usart = unsafe { &*USART2::ptr() };
+
     info!("Inside the main function");
+
     let letter = b'a';
+
     loop {
         info!("Started sending");
-        // usart.fifointenset.modify(|_, w| w.txlvl().enabled());
-        for i in 0..4 {
+        usart.fifointenset.modify(|_, w| w.txlvl().enabled());
+        for i in 0..5 {
             info!("Letter {}", i);
             usart
                 .fifowr
                 .modify(|_, w| unsafe { w.txdata().bits(letter as u16) });
+            for _ in 0..500_000 {
+                nop();
+            }
+            usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
         }
         // usart.fifocfg.modify(|_, w| w.emptyrx().set_bit());
 
@@ -554,11 +561,15 @@ async fn main(_spawner: Spawner) {
         for _ in 0..200_000 {
             nop();
         }
+
         info!("Started reading");
         usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
-        for i in 0..4 {
+        for i in 0..5 {
             info!("Letter {}", i);
             usart.fiford.read().bits();
+            for _ in 0..500_000 {
+                nop();
+            }
         }
         usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
         info!("Finished reading");

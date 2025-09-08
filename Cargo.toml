@@ -1,13 +1,12 @@
 [package]
-name = "experimental"
+name = "lpc-experimental"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-embassy-nxp = { version = "0.1.0", path = "../embassy-opensource/embassy/embassy-nxp", features = ["lpc55", "rt", "defmt"] }
-embassy-executor = { version = "0.8.0", path = "../embassy-opensource/embassy/embassy-executor", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }
-embassy-sync = { version = "0.7.0", path = "../embassy-opensource/embassy/embassy-sync", features = ["defmt"] }
-embassy-time = { version = "0.4.0", path = "../embassy-opensource/embassy/embassy-time", features = ["defmt"] }
+embassy-executor = { version = "0.9.0", path = "../embassy/embassy-executor", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-sync = { version = "0.7.0", path = "../embassy/embassy-sync", features = ["defmt"] }
+embassy-time = { version = "0.5.0", path = "../embassy/embassy-time", features = ["defmt"] }
 panic-halt = "1.0.0"
 cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.0"}
@@ -15,6 +14,6 @@ defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 panic-semihosting = "0.6.0"
-lpc55-pac = "0.5.0"
-embassy-hal-internal = { version = "0.3.0", path = "../embassy-opensource/embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
+nxp-pac = { version = "0.1.0", features = ["lpc55s69_cm33_core0"], git = "https://github.com/frihetselsker/nxp-pac", rev = "4e03ba65530639428cb6d6f9591578480711ccc7"}
+embassy-hal-internal = { version = "0.3.0", path = "../embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
 portable-atomic = "1.11.1"

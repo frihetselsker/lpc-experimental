@@ -1,22 +1,12 @@
 #![no_std]
 #![no_main]
 
-use core::any::Any;
-use core::future::{poll_fn, Future};
-use core::marker::PhantomData;
-use core::task::Poll;
-
 use cortex_m::asm::nop;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
-use embassy_hal_internal::interrupt::{InterruptExt, Priority};
-use embassy_sync::waitqueue::AtomicWaker;
-use lpc55_pac::{interrupt, FLEXCOMM2, IOCON, SYSCON, USART2};
-use portable_atomic::AtomicU8;
+use nxp_pac::{FLEXCOMM2, *};
 use {defmt_rtt as _, panic_halt as _};
 
-static COUNTER: AtomicU8 = AtomicU8::new(0);
 
 /// Serial error
 #[derive(Format, Debug, Eq, PartialEq, Copy, Clone)]
@@ -49,15 +39,6 @@ pub enum DataBits {
     DataBits9,
 }
 
-impl DataBits {
-    fn bits(&self) -> u8 {
-        match self {
-            Self::DataBits7 => 0b00,
-            Self::DataBits8 => 0b01,
-            Self::DataBits9 => 0b10,
-        }
-    }
-}
 
 /// Parity bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,16 +54,6 @@ pub enum Parity {
     ParityOdd,
 }
 
-impl Parity {
-    fn bits(&self) -> u8 {
-        match self {
-            Self::ParityNone => 0b00,
-            Self::ParityEven => 0b10,
-            Self::ParityOdd => 0b11,
-        }
-    }
-}
-
 /// Stop bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StopBits {
@@ -92,14 +63,6 @@ pub enum StopBits {
     STOP2,
 }
 
-impl StopBits {
-    fn bits(&self) -> bool {
-        return match self {
-            Self::STOP1 => false,
-            Self::STOP2 => true,
-        };
-    }
-}
 
 /// UART config.
 #[non_exhaustive]
@@ -132,61 +95,33 @@ impl Default for Config {
     }
 }
 
-pub struct State {
-    tx_waker: AtomicWaker,
-    tx_buf: RingBuffer,
-    rx_waker: AtomicWaker,
-    rx_buf: RingBuffer,
-    rx_error: AtomicU8,
-}
+fn dma_init(){
+    // Start clock for DMA
+    SYSCON.ahbclkctrl0().modify(|w| w.set_dma0(true));
+    // Reset DMA
+    SYSCON.presetctrl0().modify(|w| w.set_dma0_rst(syscon::vals::Dma0Rst::ASSERTED));
+    SYSCON.presetctrl0().modify(|w| w.set_dma0_rst(syscon::vals::Dma0Rst::RELEASED));
 
-impl State {
-    pub const fn new() -> Self {
-        Self {
-            rx_buf: RingBuffer::new(),
-            tx_buf: RingBuffer::new(),
-            rx_waker: AtomicWaker::new(),
-            tx_waker: AtomicWaker::new(),
-            rx_error: AtomicU8::new(0),
-        }
-    }
-}
-
-pub fn init_buffers<'d>(
-    state: &State,
-    tx_buffer: Option<&'d mut [u8]>,
-    rx_buffer: Option<&'d mut [u8]>,
-) {
-    if let Some(tx_buffer) = tx_buffer {
-        let len = tx_buffer.len();
-        unsafe { state.tx_buf.init(tx_buffer.as_mut_ptr(), len) };
-    }
-
-    if let Some(rx_buffer) = rx_buffer {
-        let len = rx_buffer.len();
-        unsafe { state.rx_buf.init(rx_buffer.as_mut_ptr(), len) };
-    }
+    //
+    DMA0.ctrl().modify(|w| {
+        w.set_enable(true);
+        w.set_enable(false);
+    });
 }
 
 fn init(config: Config) {
     info!("Initialization");
-
-    // Pointers to the registers used
-
-    let syscon = unsafe { &*SYSCON::ptr() };
-    let flexcomm = unsafe { &*FLEXCOMM2::ptr() };
-    let iocon = unsafe { &*IOCON::ptr() };
-    let usart = unsafe { &*USART2::ptr() };
+    dma_init();
 
     // Enable clocks (Syscon is enabled by default)
     info!("Enable clocks");
-    syscon.ahbclkctrl0.modify(|_, w| w.iocon().enable());
-    syscon.ahbclkctrl1.modify(|_, w| w.fc2().enable());
+    SYSCON.ahbclkctrl0().modify(|w| w.set_iocon(true));
+    SYSCON.ahbclkctrl1().modify(|w| w.set_fc(2, true));
 
     // Reset Flexcomm 2
     info!("Reset Flexcomm");
-    syscon.presetctrl1.modify(|_, w| w.fc2_rst().set_bit());
-    syscon.presetctrl1.modify(|_, w| w.fc2_rst().clear_bit());
+    SYSCON.presetctrl1().modify(|w| w.set_fc_rst(2, syscon::vals::FcRst::ASSERTED));
+    SYSCON.presetctrl1().modify(|w| w.set_fc_rst(2, syscon::vals::FcRst::RELEASED));
 
     // Select the clock source for Flexcomm 2
 
@@ -195,15 +130,15 @@ fn init(config: Config) {
     // Depends on the oversampling rate, for this example 16x oversampling is used
     let source_clock = match config.baudrate {
         750_001..=6_000_000 => {
-            syscon.fcclksel2().write(|w| w.sel().enum_0x3()); // 96 MHz
+            SYSCON.fcclksel(2).modify(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X3)); // 96 MHz
             96_000_000
         }
         1_501..=750_000 => {
-            syscon.fcclksel2().write(|w| w.sel().enum_0x2()); // 12 MHz
+            SYSCON.fcclksel(2).write(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X2)); // 12 MHz
             12_000_000
         }
         121..=1_500 => {
-            syscon.fcclksel2().write(|w| w.sel().enum_0x4()); // 1 MHz
+            SYSCON.fcclksel(2).write(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X4)); // 1 MHz
             1_000_000
         }
         _ => {
@@ -217,36 +152,24 @@ fn init(config: Config) {
     // The FRG is typically set up to produce an integer multiple of the highest required baud
     // rate, or a very close approximation. The BRG is then used to obtain the actual baud rate
     // needed.
-    flexcomm.pselid.modify(|_, w| w.persel().usart());
+    FLEXCOMM2.pselid().modify(|w| w.set_persel(flexcomm::vals::Persel::USART));
     //IOCON Setup
     info!("IOCON Setup");
-    iocon.pio1_24.modify(|_, w| {
-        w.func()
-            .alt1()
-            .digimode()
-            .digital()
-            .slew()
-            .standard()
-            .mode()
-            .inactive()
-            .invert()
-            .disabled()
-            .od()
-            .normal()
+    IOCON.pio1(24).modify(|w| {
+        w.set_func(iocon::vals::PioFunc::ALT1);
+        w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
+        w.set_slew(iocon::vals::PioSlew::STANDARD);
+        w.set_mode(iocon::vals::PioMode::INACTIVE);
+        w.set_invert(false);
+        w.set_od(iocon::vals::PioOd::NORMAL);
     }); // rx
-    iocon.pio0_27.modify(|_, w| {
-        w.func()
-            .alt1()
-            .digimode()
-            .digital()
-            .slew()
-            .standard()
-            .mode()
-            .inactive()
-            .invert()
-            .disabled()
-            .od()
-            .normal()
+    IOCON.pio0(27).modify(|w| {
+        w.set_func(iocon::vals::PioFunc::ALT1);
+        w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
+        w.set_slew(iocon::vals::PioSlew::STANDARD);
+        w.set_mode(iocon::vals::PioMode::INACTIVE);
+        w.set_invert(false);
+        w.set_od(iocon::vals::PioOd::NORMAL);
     }); // tx
         // To get the baudrate, we need to backpropagate across the formulas
         // Having baud rate, assume DIV is 256 since it gives more granularity
@@ -276,58 +199,85 @@ fn init(config: Config) {
     crate::assert!(mult_value < 256);
     crate::assert!(brg_value < 256);
     info!("Flexcomm clock");
-    syscon
-        .flexfrg2ctrl()
-        .modify(|_, w| unsafe { w.div().bits(0xFF).mult().bits(mult_value as u8) });
-
+    SYSCON.flexfrgctrl(2)
+        .modify(|w|{
+            w.set_div(0xFF);
+            w.set_mult(mult_value as u8);
+        } );
     info!("Baud rate config");
-    usart
-        .brg
-        .modify(|_, w| unsafe { w.brgval().bits((brg_value - 1) as u16) }); // Baud rate = Flexcomm Interface fucntion clock / (BRGVAL + 1)
+    USART2
+        .brg()
+        .modify(|w| { 
+            w.set_brgval((brg_value - 1) as u16);
+        }); // Baud rate = Flexcomm Interface fucntion clock / (BRGVAL + 1)
 
     // The clock is divided by 16 afterwards
 
     info!("USART Config");
     // USART configuration part
-    usart.cfg.modify(|_, w| {
-        w.linmode()
-            .disabled()
-            .ctsen()
-            .disabled()
-            .syncen()
-            .asynchronous_mode()
-            .clkpol()
-            .rising_edge()
-            .syncmst()
-            .master()
-            .loop_()
-            .normal()
-            .oeta()
-            .disabled()
-            .oesel()
-            .standard()
-            .autoaddr()
-            .disabled()
-            .oepol()
-            .low()
-    });
+    USART2.cfg().modify(|w| {
+            // LIN break mode enable
+            // Disabled. Break detect and generate is configured for normal operation.
+            w.set_linmode(false);
+            //CTS Enable. Determines whether CTS is used for flow control. CTS can be from the
+            //input pin, or from the USART’s own RTS if loopback mode is enabled.
+            // No flow control. The transmitter does not receive any automatic flow control signal.
+            w.set_ctsen(false);
+            // Selects synchronous or asynchronous operation.
+            w.set_syncen(nxp_pac::usart::vals::Syncen::ASYNCHRONOUS_MODE);
+            // Selects the clock polarity and sampling edge of received data in synchronous mode.
+            w.set_clkpol(nxp_pac::usart::vals::Clkpol::RISING_EDGE);
+            // Synchronous mode Master select.
+            // When synchronous mode is enabled, the USART is a master.
+            w.set_syncmst(nxp_pac::usart::vals::Syncmst::MASTER);
+            // Selects data loopback mode
+            w.set_loop_(nxp_pac::usart::vals::Loop::NORMAL);
+            // Output Enable Turnaround time enable for RS-485 operation.
+            // Disabled. If selected by OESEL, the Output Enable signal deasserted at the end of
+            // the last stop bit of a transmission.
+            w.set_oeta(false);
+            // Output enable select.
+            // Standard. The RTS signal is used as the standard flow control function.
+            w.set_oesel(nxp_pac::usart::vals::Oesel::STANDARD);
+            // Automatic address matching enable.
+            // Disabled. When addressing is enabled by ADDRDET, address matching is done by
+            // software. This provides the possibility of versatile addressing (e.g. respond to more
+            // than one address)
+            w.set_autoaddr(false);
+            // Output enable polarity.
+            // Low. If selected by OESEL, the output enable is active low.
+            w.set_oepol(nxp_pac::usart::vals::Oepol::LOW);
+        });
 
-    // Based on configuration
-    usart.cfg.modify(|_, w| unsafe {
-        w.datalen()
-            .bits(config.data_bits.bits())
-            .paritysel()
-            .bits(config.parity.bits())
-            .stoplen()
-            .bit(config.stop_bits.bits())
-            .rxpol()
-            .bit(config.invert_rx)
-            .txpol()
-            .bit(config.invert_tx)
-    });
+        // Configurations based on the config written by a user
+        USART2.cfg().modify(|w| {
+            w.set_datalen(match config.data_bits {
+                DataBits::DataBits7 => nxp_pac::usart::vals::Datalen::BIT_7,
+                DataBits::DataBits8 => nxp_pac::usart::vals::Datalen::BIT_8,
+                DataBits::DataBits9 => nxp_pac::usart::vals::Datalen::BIT_9,
+            });
+            w.set_paritysel(match config.parity {
+                Parity::ParityNone => nxp_pac::usart::vals::Paritysel::NO_PARITY,
+                Parity::ParityEven => nxp_pac::usart::vals::Paritysel::EVEN_PARITY,
+                Parity::ParityOdd => nxp_pac::usart::vals::Paritysel::ODD_PARITY,
+            });
+            w.set_stoplen(match config.stop_bits {
+                StopBits::STOP1 => nxp_pac::usart::vals::Stoplen::BIT_1,
+                StopBits::STOP2 => nxp_pac::usart::vals::Stoplen::BITS_2,
+            });
+            w.set_rxpol(match config.invert_rx {
+                false => nxp_pac::usart::vals::Rxpol::STANDARD,
+                true => nxp_pac::usart::vals::Rxpol::INVERTED,
+            });
+            w.set_txpol(match config.invert_tx {
+                false => nxp_pac::usart::vals::Txpol::STANDARD,
+                true => nxp_pac::usart::vals::Txpol::INVERTED,
+            });
+        });
+
 
     info!("Oversampling setup");
-    usart.osr.modify(|_, w| unsafe { w.osrval().bits(0xF) }); // 16x Oversampling
+    USART2.osr().modify(|w| {w.set_osrval(0xF); }); // 16x Oversampling
                                                               // 5x Oversampling is minimal
 
     // By default, the oversampling rate is 16x
@@ -335,9 +285,12 @@ fn init(config: Config) {
     // FIFO Configuration
 
     info!("Disabling DMA");
-    usart
-        .fifocfg
-        .modify(|_, w| w.dmatx().disabled().dmarx().disabled());
+    USART2
+        .fifocfg()
+        .modify(|w| {
+            w.set_dmarx(false);
+            w.set_dmatx(false);
+        });
 
     // USART Interrupts
     /* usart.intenset.modify(|_, w| {
@@ -354,16 +307,21 @@ fn init(config: Config) {
     // Enable FIFO and USART
 
     info!("After all settings, enable fifo");
-    usart
-        .fifocfg
-        .modify(|_, w| w.enabletx().enabled().enablerx().enabled());
+    USART2
+        .fifocfg()
+        .modify(|w| {
+            w.set_enablerx(true);
+            w.set_enabletx(true);
+        });
 
     for _ in 0..200_000 {
         nop();
     }
 
     info!("Enable USART");
-    usart.cfg.modify(|_, w| w.enable().enabled());
+    USART2.cfg().modify(|w| {
+        w.set_enable(true);
+    });
 
     for _ in 0..200_000 {
         nop();
@@ -385,158 +343,25 @@ fn init(config: Config) {
     // });
 
     // FIFO Interrupts
-    critical_section::with(|_cs| {
-        usart.fifotrig.modify(|_, w| unsafe {
-            w.txlvl()
-                .bits(3)
-                .txlvlena()
-                .enabled()
-                .rxlvl()
-                .bits(3)
-                .rxlvlena()
-                .enabled()
+
+        USART2.fifotrig().modify(|w| {
+            w.set_txlvl(3);
+            w.set_txlvlena(true);
+            w.set_rxlvl(3);
+            w.set_rxlvlena(true);
         });
-        usart.fifointenset.modify(|_, w| {
-            w.txerr()
-                .enabled()
-                .rxerr()
-                .enabled()
-                .txlvl()
-                .disabled()
-                .rxlvl()
-                .disabled()
+        USART2.fifointenset().modify(|w| {
+            w.set_rxerr(true);
+            w.set_txerr(true);
+            w.set_txlvl(false);
+            w.set_rxlvl(false);
         });
-        // Enable interrupts
 
-        unsafe {
-            interrupt::FLEXCOMM2.set_priority(Priority::from(3));
-            interrupt::FLEXCOMM2.enable();
-        }
-    });
-}
-
-/// Transmit the provided buffer blocking execution until done.
-// fn blocking_write(buffer: &[u8]) -> Result<(), Error> {
-//     let usart = unsafe { &*USART2::ptr() };
-//     usart.fifointenset.modify(|_, w| w.txlvl().enabled());
-//     for &b in buffer {
-//         while usart.fifostat.read().txnotfull().bit_is_clear() {}
-//         usart
-//             .fifowr
-//             .modify(|_, w| unsafe { w.txdata().bits(b as u16) });
-//         let data = usart.fifostat.read().txlvl().bits();
-//         info!("TX FIFO: {}", data);
-//     }
-//     // usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
-//     Ok(())
-// }
-
-// /// Flush UART TX blocking execution until done.
-// fn blocking_flush() -> Result<(), Error> {
-//     let usart = unsafe { &*USART2::ptr() };
-//     while usart.fifostat.read().txempty().bit_is_clear() {}
-//     Ok(())
-// }
-
-// /// Check if UART is busy transmitting.
-// fn busy() -> bool {
-//     let usart = unsafe { &*USART2::ptr() };
-//     usart.fifostat.read().txempty().bit_is_clear()
-// }
-
-// /// Read from UART RX blocking execution until done.
-
-// fn blocking_read(mut buffer: &mut [u8]) -> Result<(), Error> {
-//     let usart = unsafe { &*USART2::ptr() };
-//     usart.fifotrig.modify(|_, w| w.rxlvlena().enabled());
-//     usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
-//     while !buffer.is_empty() {
-//         match drain_fifo(buffer) {
-//             Ok(0) => continue, // Wait for more data
-//             Ok(n) => buffer = &mut buffer[n..],
-//             Err((_, err)) => return Err(err),
-//         }
-//     }
-//     usart.fifotrig.modify(|_, w| w.rxlvlena().disabled());
-//     usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
-//     Ok(())
-// }
-// /// Returns Ok(len) if no errors occurred. Returns Err((len, err)) if an error was
-// /// encountered. in both cases, `len` is the number of *good* bytes copied into
-// /// `buffer`.
-// fn drain_fifo(buffer: &mut [u8]) -> Result<usize, (usize, Error)> {
-//     let usart = unsafe { &*USART2::ptr() };
-//     usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
-//     for (i, b) in buffer.iter_mut().enumerate() {
-//         let data = usart.fifostat.read().rxlvl().bits();
-//         info!("RX FIFO: {}", data);
-//         while usart.fifostat.read().rxnotempty().bit_is_clear() {}
-
-//         if usart.fifostat.read().rxerr().bit_is_set() {
-//             return Err((i, Error::Overrun));
-//         } else if usart.fifordnopop.read().parityerr().bit_is_set() {
-//             return Err((i, Error::Parity));
-//         } else if usart.fifordnopop.read().framerr().bit_is_set() {
-//             return Err((i, Error::Framing));
-//         } else if usart.fifordnopop.read().rxnoise().bit_is_set() {
-//             return Err((i, Error::Noise));
-//         }
-
-//         let dr = usart.fiford.read().bits() as u8;
-//         *b = dr;
-//     }
-//     Ok(buffer.len())
-// }
-
-#[cortex_m_rt::interrupt]
-fn FLEXCOMM2() {
-    COUNTER.add(1, core::sync::atomic::Ordering::Relaxed);
-    let usart = unsafe { &*USART2::ptr() };
-    let tx_level = usart.fifostat.read().txlvl().bits();
-    let rx_level = usart.fifostat.read().rxlvl().bits();
-
-    let tx_error = usart.fifostat.read().txerr().bit_is_set();
-    let rx_error = usart.fifostat.read().rxerr().bit_is_set();
-    let peripheral_error = usart.fifostat.read().perint().bit_is_set();
-
-    // let tx_empty = usart.fifostat.read().txempty().bit_is_set();
-    // let tx_not_full = usart.fifostat.read().txnotfull().bit_is_set();
-    // let rx_not_empty = usart.fifostat.read().rxnotempty().bit_is_set();
-    // let rx_full = usart.fifostat.read().rxfull().bit_is_set();
-
-    warn!("On interrupt");
-    warn!(
-        "COUNTER: {}",
-        COUNTER.load(core::sync::atomic::Ordering::Relaxed)
-    );
-
-    info!("TX FIFO {}", tx_level);
-    info!("RX FIFO {}", rx_level);
-
-    info!("Errors: ");
-    info!("TX Error raised: {}", tx_error);
-    info!("RX Error raised: {}", rx_error);
-    info!("Peripheral error raised: {}", peripheral_error);
-
-    // info!("other flags:");
-    // info!("tx empty raised: {}", tx_empty);
-    // info!("tx not full raised: {}", tx_not_full);
-    // info!("rx not empty raised: {}", rx_not_empty);
-    // info!("rx full raised: {}", rx_full);
-
-    usart
-        .fifointenclr
-        .modify(|_, w| w.txlvl().set_bit().rxlvl().set_bit());
-
-    for _ in 0..1_000_000 {
-        nop();
-    }
 }
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init(Config::default());
-    let usart = unsafe { &*USART2::ptr() };
 
     info!("Inside the main function");
 
@@ -544,16 +369,16 @@ async fn main(_spawner: Spawner) {
 
     loop {
         info!("Started sending");
-        usart.fifointenset.modify(|_, w| w.txlvl().enabled());
         for i in 0..5 {
             info!("Letter {}", i);
-            usart
-                .fifowr
-                .modify(|_, w| unsafe { w.txdata().bits(letter as u16) });
+            USART2
+                .fifowr()
+                .write(|w| { 
+                    w.set_txdata(letter as u16);
+                });
             for _ in 0..500_000 {
                 nop();
             }
-            usart.fifointenclr.modify(|_, w| w.txlvl().set_bit());
         }
         // usart.fifocfg.modify(|_, w| w.emptyrx().set_bit());
 
@@ -563,15 +388,13 @@ async fn main(_spawner: Spawner) {
         }
 
         info!("Started reading");
-        usart.fifointenset.modify(|_, w| w.rxlvl().enabled());
         for i in 0..5 {
             info!("Letter {}", i);
-            usart.fiford.read().bits();
+            info!("{}", USART2.fiford().read().rxdata());
             for _ in 0..500_000 {
                 nop();
             }
         }
-        usart.fifointenclr.modify(|_, w| w.rxlvl().set_bit());
         info!("Finished reading");
         for _ in 0..1_000_000 {
             nop();

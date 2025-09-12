@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::mem::MaybeUninit;
 use core::mem::*;
+use core::{fmt::Write, mem::MaybeUninit};
 use cortex_m::asm::nop;
 use defmt::*;
 use embassy_executor::Spawner;
@@ -10,7 +10,7 @@ use nxp_pac::{FLEXCOMM2, *};
 use {defmt_rtt as _, panic_halt as _};
 
 #[repr(C, align(16))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, defmt::Format)]
 struct DmaDescriptor {
     reserved: u32,
     source_end_addr: u32,
@@ -30,6 +30,7 @@ impl Default for DmaDescriptor {
 }
 
 #[repr(C, align(512))]
+#[derive(defmt::Format)]
 struct DmaDescriptorTable {
     descriptors: [DmaDescriptor; 32],
 }
@@ -455,10 +456,28 @@ async fn main(_spawner: Spawner) {
     info!("Sending using DMA");
     DMA0.settrig0()
         .write(|w| w.set_trig(1 << write_channel_number));
-    for _ in 0..1_000_000 {
+    for _ in 0..10_000 {
         nop();
     }
 
+    unsafe {
+        info!(
+            "Write descriptor: {}",
+            DMA_DESCRIPTORS.assume_init_read().descriptors[write_channel_number]
+        );
+    }
+    info!(
+        "Is it triggered? {}",
+        DMA0.channel(write_channel_number).ctlstat().read().trig()
+    );
+    info!(
+        "Is it active? {}",
+        DMA0.active0().read().act() & (1 << write_channel_number)
+    );
+    info!(
+        "Is it busy? {}",
+        DMA0.busy0().read().bsy() & (1 << write_channel_number)
+    );
     write_to_table(
         read_channel_number as u8,
         USART2.fiford().as_ptr() as u32,
@@ -486,9 +505,27 @@ async fn main(_spawner: Spawner) {
     info!("Reading using DMA");
     DMA0.settrig0().write(|w| w.set_trig(1 << 10));
     info!("Finished reading");
-    for _ in 0..1_000_000 {
+    for _ in 0..10_000 {
         nop();
     }
 
+    unsafe {
+        info!(
+            "Read descriptor: {}",
+            DMA_DESCRIPTORS.assume_init_read().descriptors[read_channel_number]
+        );
+    }
+    info!(
+        "Is it triggered? {}",
+        DMA0.channel(read_channel_number).ctlstat().read().trig()
+    );
+    info!(
+        "Is it active? {}",
+        DMA0.active0().read().act() & (1 << read_channel_number)
+    );
+    info!(
+        "Is it busy? {}",
+        DMA0.busy0().read().bsy() & (1 << read_channel_number)
+    );
     info!("Result: {:a}", buffer);
 }

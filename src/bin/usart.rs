@@ -7,6 +7,7 @@ use cortex_m::asm::nop;
 use critical_section::Mutex;
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_hal_internal::interrupt::InterruptExt;
 use nxp_pac::{interrupt, FLEXCOMM2, *};
 use {defmt_rtt as _, panic_halt as _};
 
@@ -47,20 +48,6 @@ static DMA_DESCRIPTORS: Mutex<RefCell<DmaDescriptorTable>> = Mutex::new(RefCell:
     next_desc: 0,
 }; CHANNEL_COUNT] }));
 
-// #[cortex_m_rt::interrupt]
-// fn DMA_IRQ_0() {
-//     for channel in 0..CHANNEL_COUNT {
-//         let ctrl_trig = nxp_pac::DMA.ch(channel).ctrl_trig().read();
-//         if ctrl_trig.ahb_error() {
-//             defmt::panic!("DMA: error on DMA_0 channel {}", channel);
-//         }
-
-//         if ints0 & (1 << channel) == (1 << channel) {
-//             CHANNEL_WAKERS[channel].wake();
-//         }
-//     }
-//     pac::DMA.ints(0).write_value(ints0);
-// }
 /// Word length.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DataBits {
@@ -162,9 +149,9 @@ fn dma_init() {
     //Enable DMA controller
     DMA0.ctrl().modify(|w| w.set_enable(true));
 
-    // unsafe {
-    //     nxp_pac::interrupt::DMA0.enable();
-    // }
+    unsafe {
+        nxp_pac::interrupt::DMA0.enable();
+    }
 }
 
 fn write_to_table(channel_number: u8, source_end_addr: u32, dest_end_addr: u32) {
@@ -426,16 +413,6 @@ async fn main(_spawner: Spawner) {
         let mut buffer: [u8; 16] = [0u8; 16];
         info!("Started sending");
 
-        // for letter in slogan {
-        //     info!("Letter {}", *letter as char);
-        //     USART2.fifowr().write(|w| {
-        //         w.set_txdata(*letter as u16);
-        //     });
-        //     for _ in 0..500_000 {
-        //         nop();
-        //     }
-        // }
-
         write_to_table(
             WRITE_CHANNEL_NUMBER as u8,
             slogan.as_ptr() as u32 + (slogan.len() - 1) as u32,
@@ -501,6 +478,8 @@ async fn main(_spawner: Spawner) {
         DMA0.channel(READ_CHANNEL_NUMBER).xfercfg().write(|w| {
             w.set_cfgvalid(true);
             w.set_reload(false);
+            w.set_setinta(true);
+            w.set_setintb(false);
             w.set_width(dma::vals::Width::BIT_8);
             w.set_srcinc(dma::vals::Srcinc::NO_INCREMENT);
             w.set_dstinc(dma::vals::Dstinc::WIDTH_X_1);
@@ -540,7 +519,22 @@ async fn main(_spawner: Spawner) {
         info!("Result: {:a}", buffer);
     }
 }
-#[interrupt]
-fn DMA0() {
-    info!("On interrupt");
-}
+    #[interrupt]
+    fn DMA0() {
+        warn!("On interrupt");
+
+        for i in 0..CHANNEL_COUNT {
+
+            let inta = DMA0.inta0().read().ia();
+
+            if (inta & (1 << i)) != 0 {
+                info!("Channel {} in interrupt mode", i);
+                DMA0.inta0().modify(|w| w.set_ia(1 << i));
+            }
+
+            if (DMA0.errint0().read().err() & (1 << i)) != 0 {
+                defmt::panic!("Error in channel {}", i);
+            }
+        }
+        // defmt::panic!("final");
+    }

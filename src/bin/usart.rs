@@ -6,7 +6,8 @@ use core::{fmt::Write, mem::MaybeUninit};
 use cortex_m::asm::nop;
 use defmt::*;
 use embassy_executor::Spawner;
-use nxp_pac::{FLEXCOMM2, *};
+use embassy_hal_internal::interrupt::InterruptExt;
+use nxp_pac::{interrupt, FLEXCOMM2, *};
 use {defmt_rtt as _, panic_halt as _};
 
 #[repr(C, align(16))]
@@ -158,6 +159,10 @@ fn dma_init() {
 
     //Enable DMA controller
     DMA0.ctrl().modify(|w| w.set_enable(true));
+
+    unsafe {
+        nxp_pac::interrupt::DMA0.enable();
+    }
 }
 
 fn write_to_table(channel_number: u8, source_end_addr: u32, dest_end_addr: u32) {
@@ -442,6 +447,8 @@ async fn main(_spawner: Spawner) {
     DMA0.channel(write_channel_number).xfercfg().write(|w| {
         w.set_cfgvalid(true);
         w.set_reload(false);
+        w.set_setinta(true);
+        w.set_setintb(false);
         w.set_width(dma::vals::Width::BIT_8);
         w.set_srcinc(dma::vals::Srcinc::WIDTH_X_1);
         w.set_dstinc(dma::vals::Dstinc::NO_INCREMENT);
@@ -528,4 +535,9 @@ async fn main(_spawner: Spawner) {
         DMA0.busy0().read().bsy() & (1 << read_channel_number)
     );
     info!("Result: {:a}", buffer);
+}
+
+#[interrupt]
+fn DMA0() {
+    info!("On interrupt");
 }

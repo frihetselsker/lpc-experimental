@@ -18,3 +18,8 @@ panic-semihosting = "0.6.0"
 nxp-pac = { version = "0.1.0", features = ["lpc55s69_cm33_core0"], git = "https://github.com/i509VCB/nxp-pac", rev = "b736e3038254d593024aaa1a5a7b1f95a5728538"}
 embassy-hal-internal = { version = "0.3.0", path = "../embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
 portable-atomic = "1.11.1"
+
+[features]
+default = ["rt"]
+
+rt = ["nxp-pac/rt"]

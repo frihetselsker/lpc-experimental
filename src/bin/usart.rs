@@ -1,14 +1,18 @@
 #![no_std]
 #![no_main]
 
-use core::mem::*;
-use core::{fmt::Write, mem::MaybeUninit};
+use core::cell::RefCell;
+
 use cortex_m::asm::nop;
+use critical_section::Mutex;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_hal_internal::interrupt::InterruptExt;
 use nxp_pac::{interrupt, FLEXCOMM2, *};
 use {defmt_rtt as _, panic_halt as _};
+
+const CHANNEL_COUNT: usize = 32;
+const WRITE_CHANNEL_NUMBER: usize = 11;
+const READ_CHANNEL_NUMBER: usize = 10;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, defmt::Format)]
@@ -33,10 +37,15 @@ impl Default for DmaDescriptor {
 #[repr(C, align(512))]
 #[derive(defmt::Format)]
 struct DmaDescriptorTable {
-    descriptors: [DmaDescriptor; 32],
+    descriptors: [DmaDescriptor; CHANNEL_COUNT],
 }
 
-static mut DMA_DESCRIPTORS: MaybeUninit<DmaDescriptorTable> = MaybeUninit::uninit();
+static DMA_DESCRIPTORS: Mutex<RefCell<DmaDescriptorTable>> = Mutex::new(RefCell::new(DmaDescriptorTable { descriptors: [DmaDescriptor {
+    reserved: 0,
+    source_end_addr: 0,
+    dest_end_addr: 0,
+    next_desc: 0,
+}; CHANNEL_COUNT] }));
 
 // #[cortex_m_rt::interrupt]
 // fn DMA_IRQ_0() {
@@ -121,14 +130,6 @@ impl Default for Config {
 }
 
 fn dma_init() {
-    // Initialize DMA descriptor table
-    let descriptor_table = unsafe {
-        let table = DmaDescriptorTable {
-            descriptors: [DmaDescriptor::default(); 32],
-        };
-        DMA_DESCRIPTORS.write(table)
-    };
-
     crate::assert_eq!(
         core::mem::size_of::<DmaDescriptor>(),
         16,
@@ -154,9 +155,10 @@ fn dma_init() {
         .presetctrl0()
         .modify(|w| w.set_dma0_rst(syscon::vals::Dma0Rst::RELEASED));
 
-    DMA0.srambase()
-        .write(|w| unsafe { w.set_offset((DMA_DESCRIPTORS.as_ptr() as u32) >> 9) });
-
+    critical_section::with(|cs| {
+        DMA0.srambase()
+        .write(|w| { w.set_offset((DMA_DESCRIPTORS.borrow(cs).as_ptr() as u32) >> 9) });
+    });
     //Enable DMA controller
     DMA0.ctrl().modify(|w| w.set_enable(true));
 
@@ -166,13 +168,14 @@ fn dma_init() {
 }
 
 fn write_to_table(channel_number: u8, source_end_addr: u32, dest_end_addr: u32) {
-    let table = unsafe { DMA_DESCRIPTORS.assume_init_mut() };
-    table.descriptors[channel_number as usize] = DmaDescriptor {
+    critical_section::with(|cs| {
+        DMA_DESCRIPTORS.borrow(cs).borrow_mut().descriptors[channel_number as usize] = DmaDescriptor {
         reserved: 0,
         source_end_addr,
         dest_end_addr,
         next_desc: 0,
     }
+    });
 }
 
 fn init(config: Config) {
@@ -419,8 +422,6 @@ async fn main(_spawner: Spawner) {
 
     info!("Inside the main function");
     loop {
-        let write_channel_number: usize = 11;
-        let read_channel_number: usize = 10;
         let slogan = b"IN RUST WE TRUST";
         let mut buffer: [u8; 16] = [0u8; 16];
         info!("Started sending");
@@ -436,16 +437,16 @@ async fn main(_spawner: Spawner) {
         // }
 
         write_to_table(
-            write_channel_number as u8,
+            WRITE_CHANNEL_NUMBER as u8,
             slogan.as_ptr() as u32 + (slogan.len() - 1) as u32,
             USART2.fifowr().as_ptr() as u32,
         );
-        DMA0.channel(write_channel_number).cfg().write(|w| {
+        DMA0.channel(WRITE_CHANNEL_NUMBER).cfg().write(|w| {
             w.set_periphreqen(true);
             w.set_hwtrigen(false);
             w.set_chpriority(0);
         });
-        DMA0.channel(write_channel_number).xfercfg().write(|w| {
+        DMA0.channel(WRITE_CHANNEL_NUMBER).xfercfg().write(|w| {
             w.set_cfgvalid(true);
             w.set_reload(false);
             w.set_setinta(true);
@@ -457,46 +458,47 @@ async fn main(_spawner: Spawner) {
             w.set_swtrig(false);
         });
         DMA0.enableset0()
-            .write(|w| w.set_ena(1 << write_channel_number));
+            .write(|w| w.set_ena(1 << WRITE_CHANNEL_NUMBER));
         DMA0.intenset0()
-            .write(|w| w.set_inten(1 << write_channel_number));
+            .write(|w| w.set_inten(1 << WRITE_CHANNEL_NUMBER));
 
         info!("Sending using DMA");
         DMA0.settrig0()
-            .write(|w| w.set_trig(1 << write_channel_number));
+            .write(|w| w.set_trig(1 << WRITE_CHANNEL_NUMBER));
         for _ in 0..10_000 {
             nop();
         }
 
-        unsafe {
+        critical_section::with(|cs| {
             info!(
                 "Write descriptor: {}",
-                DMA_DESCRIPTORS.assume_init_read().descriptors[write_channel_number]
+                DMA_DESCRIPTORS.borrow(cs).borrow().descriptors[WRITE_CHANNEL_NUMBER
+]
             );
-        }
+        });
         info!(
             "Is it triggered? {}",
-            DMA0.channel(write_channel_number).ctlstat().read().trig()
+            DMA0.channel(WRITE_CHANNEL_NUMBER).ctlstat().read().trig()
         );
         info!(
             "Is it active? {}",
-            DMA0.active0().read().act() & (1 << write_channel_number)
+            DMA0.active0().read().act() & (1 << WRITE_CHANNEL_NUMBER)
         );
         info!(
             "Is it busy? {}",
-            DMA0.busy0().read().bsy() & (1 << write_channel_number)
+            DMA0.busy0().read().bsy() & (1 << WRITE_CHANNEL_NUMBER)
         );
         write_to_table(
-            read_channel_number as u8,
+            READ_CHANNEL_NUMBER as u8,
             USART2.fiford().as_ptr() as u32,
             (buffer.as_mut_ptr() as u32) + buffer.len() as u32 - 1,
         );
-        DMA0.channel(read_channel_number).cfg().write(|w| {
+        DMA0.channel(READ_CHANNEL_NUMBER).cfg().write(|w| {
             w.set_periphreqen(true);
             w.set_hwtrigen(false);
             w.set_chpriority(0);
         });
-        DMA0.channel(read_channel_number).xfercfg().write(|w| {
+        DMA0.channel(READ_CHANNEL_NUMBER).xfercfg().write(|w| {
             w.set_cfgvalid(true);
             w.set_reload(false);
             w.set_width(dma::vals::Width::BIT_8);
@@ -506,9 +508,9 @@ async fn main(_spawner: Spawner) {
             w.set_swtrig(false);
         });
         DMA0.enableset0()
-            .write(|w| w.set_ena(1 << read_channel_number));
+            .write(|w| w.set_ena(1 << READ_CHANNEL_NUMBER));
         DMA0.intenset0()
-            .write(|w| w.set_inten(1 << read_channel_number));
+            .write(|w| w.set_inten(1 << READ_CHANNEL_NUMBER));
 
         info!("Reading using DMA");
         DMA0.settrig0().write(|w| w.set_trig(1 << 10));
@@ -517,23 +519,23 @@ async fn main(_spawner: Spawner) {
             nop();
         }
 
-        unsafe {
+        critical_section::with(|cs| {
             info!(
                 "Read descriptor: {}",
-                DMA_DESCRIPTORS.assume_init_read().descriptors[read_channel_number]
+                DMA_DESCRIPTORS.borrow(cs).borrow().descriptors[READ_CHANNEL_NUMBER]
             );
-        }
+        });
         info!(
             "Is it triggered? {}",
-            DMA0.channel(read_channel_number).ctlstat().read().trig()
+            DMA0.channel(READ_CHANNEL_NUMBER).ctlstat().read().trig()
         );
         info!(
             "Is it active? {}",
-            DMA0.active0().read().act() & (1 << read_channel_number)
+            DMA0.active0().read().act() & (1 << READ_CHANNEL_NUMBER)
         );
         info!(
             "Is it busy? {}",
-            DMA0.busy0().read().bsy() & (1 << read_channel_number)
+            DMA0.busy0().read().bsy() & (1 << READ_CHANNEL_NUMBER)
         );
         info!("Result: {:a}", buffer);
     }

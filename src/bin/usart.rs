@@ -41,12 +41,15 @@ struct DmaDescriptorTable {
     descriptors: [DmaDescriptor; CHANNEL_COUNT],
 }
 
-static DMA_DESCRIPTORS: Mutex<RefCell<DmaDescriptorTable>> = Mutex::new(RefCell::new(DmaDescriptorTable { descriptors: [DmaDescriptor {
-    reserved: 0,
-    source_end_addr: 0,
-    dest_end_addr: 0,
-    next_desc: 0,
-}; CHANNEL_COUNT] }));
+static DMA_DESCRIPTORS: Mutex<RefCell<DmaDescriptorTable>> =
+    Mutex::new(RefCell::new(DmaDescriptorTable {
+        descriptors: [DmaDescriptor {
+            reserved: 0,
+            source_end_addr: 0,
+            dest_end_addr: 0,
+            next_desc: 0,
+        }; CHANNEL_COUNT],
+    }));
 
 /// Word length.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,7 +147,7 @@ fn dma_init() {
 
     critical_section::with(|cs| {
         DMA0.srambase()
-        .write(|w| { w.set_offset((DMA_DESCRIPTORS.borrow(cs).as_ptr() as u32) >> 9) });
+            .write(|w| w.set_offset((DMA_DESCRIPTORS.borrow(cs).as_ptr() as u32) >> 9));
     });
     //Enable DMA controller
     DMA0.ctrl().modify(|w| w.set_enable(true));
@@ -156,12 +159,13 @@ fn dma_init() {
 
 fn write_to_table(channel_number: u8, source_end_addr: u32, dest_end_addr: u32) {
     critical_section::with(|cs| {
-        DMA_DESCRIPTORS.borrow(cs).borrow_mut().descriptors[channel_number as usize] = DmaDescriptor {
-        reserved: 0,
-        source_end_addr,
-        dest_end_addr,
-        next_desc: 0,
-    }
+        DMA_DESCRIPTORS.borrow(cs).borrow_mut().descriptors[channel_number as usize] =
+            DmaDescriptor {
+                reserved: 0,
+                source_end_addr,
+                dest_end_addr,
+                next_desc: 0,
+            }
     });
 }
 
@@ -449,8 +453,7 @@ async fn main(_spawner: Spawner) {
         critical_section::with(|cs| {
             info!(
                 "Write descriptor: {}",
-                DMA_DESCRIPTORS.borrow(cs).borrow().descriptors[WRITE_CHANNEL_NUMBER
-]
+                DMA_DESCRIPTORS.borrow(cs).borrow().descriptors[WRITE_CHANNEL_NUMBER]
             );
         });
         info!(
@@ -519,22 +522,21 @@ async fn main(_spawner: Spawner) {
         info!("Result: {:a}", buffer);
     }
 }
-    #[interrupt]
-    fn DMA0() {
-        warn!("On interrupt");
+#[interrupt]
+fn DMA0() {
+    warn!("On interrupt");
 
-        for i in 0..CHANNEL_COUNT {
+    for i in 0..CHANNEL_COUNT {
+        let inta = DMA0.inta0().read().ia();
 
-            let inta = DMA0.inta0().read().ia();
-
-            if (inta & (1 << i)) != 0 {
-                info!("Channel {} in interrupt mode", i);
-                DMA0.inta0().modify(|w| w.set_ia(1 << i));
-            }
-
-            if (DMA0.errint0().read().err() & (1 << i)) != 0 {
-                defmt::panic!("Error in channel {}", i);
-            }
+        if (inta & (1 << i)) != 0 {
+            info!("Channel {} in interrupt mode", i);
+            DMA0.inta0().modify(|w| w.set_ia(1 << i));
         }
-        // defmt::panic!("final");
+
+        if (DMA0.errint0().read().err() & (1 << i)) != 0 {
+            defmt::panic!("Error in channel {}", i);
+        }
     }
+    // defmt::panic!("final");
+}

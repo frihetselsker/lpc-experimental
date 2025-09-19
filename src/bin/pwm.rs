@@ -4,8 +4,12 @@
 use cortex_m::asm::nop;
 use defmt::*;
 use embassy_executor::Spawner;
-use nxp_pac::{FLEXCOMM2, *};
+use nxp_pac::*;
 use {defmt_rtt as _, panic_halt as _};
+
+// const DIVIDER: u8 = 96;
+const DUTY_CYCLE: u32 = 50;
+const TOP: u32 = 0xFFFF;
 
 fn init() {
     info!("Initialization");
@@ -14,6 +18,25 @@ fn init() {
     info!("Enable clocks");
     SYSCON.ahbclkctrl0().modify(|w| w.set_iocon(true));
     SYSCON.ahbclkctrl1().modify(|w| w.set_sct(true));
+
+    // IOCON Setup
+    info!("IOCON Setup");
+    IOCON.pio0(18).modify(|w| {
+        w.set_func(iocon::vals::PioFunc::ALT4);
+        w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
+        w.set_slew(iocon::vals::PioSlew::STANDARD);
+        w.set_mode(iocon::vals::PioMode::INACTIVE);
+        w.set_invert(false);
+        w.set_od(iocon::vals::PioOd::NORMAL);
+    }); // SCTimer Output 1
+
+    // Choose the clock for PWM
+    SYSCON
+        .sctclksel()
+        .modify(|w| w.set_sel(syscon::vals::SctclkselSel::ENUM_0X3));
+
+    // SYSCON.sctclkdiv().modify(|w| w.set_div(DIVIDER - 1));
+
     // Reset SCTimer
     info!("Reset SC Timer");
     SYSCON
@@ -23,120 +46,59 @@ fn init() {
         .presetctrl1()
         .modify(|w| w.set_sct_rst(syscon::vals::SctRst::RELEASED));
 
-    // Select the clock source for Flexcomm 2
-
-    info!("Select clock");
-
-    // Depends on the oversampling rate, for this example 16x oversampling is used
-    // let source_clock = match config.baudrate {
-    //     750_001..=6_000_000 => {
-    //         SYSCON
-    //             .fcclksel(2)
-    //             .modify(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X3)); // 96 MHz
-    //         96_000_000
-    //     }
-    //     1_501..=750_000 => {
-    //         SYSCON
-    //             .fcclksel(2)
-    //             .write(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X2)); // 12 MHz
-    //         12_000_000
-    //     }
-    //     121..=1_500 => {
-    //         SYSCON
-    //             .fcclksel(2)
-    //             .write(|w| w.set_sel(syscon::vals::FcclkselSel::ENUM_0X4)); // 1 MHz
-    //         1_000_000
-    //     }
-    //     _ => {
-    //         crate::unreachable!("{} baudrate is not permitted in this mode", config.baudrate);
-    //         // Try 32 KHz mode
-    //     }
-    // };
-
-    // The Fractional Rate Generator can be used to obtain more precise baud rates when the
-    // function clock is not a good multiple of standard (or otherwise desirable) baud rates.
-    // The FRG is typically set up to produce an integer multiple of the highest required baud
-    // rate, or a very close approximation. The BRG is then used to obtain the actual baud rate
-    // needed.
-    FLEXCOMM2
-        .pselid()
-        .modify(|w| w.set_persel(flexcomm::vals::Persel::I2C));
-    //IOCON Setup
-    info!("IOCON Setup");
-    IOCON.pio1(24).modify(|w| {
-        w.set_func(iocon::vals::PioFunc::ALT1);
-        w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
-        w.set_slew(iocon::vals::PioSlew::STANDARD);
-        w.set_mode(iocon::vals::PioMode::INACTIVE);
-        w.set_invert(false);
-        w.set_od(iocon::vals::PioOd::NORMAL);
-    }); // rx
-    IOCON.pio0(27).modify(|w| {
-        w.set_func(iocon::vals::PioFunc::ALT1);
-        w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
-        w.set_slew(iocon::vals::PioSlew::STANDARD);
-        w.set_mode(iocon::vals::PioMode::INACTIVE);
-        w.set_invert(false);
-        w.set_od(iocon::vals::PioOd::NORMAL);
-    }); // tx
-        // To get the baudrate, we need to backpropagate across the formulas
-        // Having baud rate, assume DIV is 256 since it gives more granularity
-
-    // Flexcomm Interface function clock = (clock selected via FCCLKSEL) / (1 + MULT / DIV)
-
-    // Firstly, we find integer division value. BRG = source_clock / (16 * baud_rate). Drop the fraction part. A bigger clock will let chisel it using FRG
-    // Secondly, raw_clock = source_clock / (16 * BRG)
-    // Thirdly, MULT = raw_clock * 256 / baud_rate - 256
-    // Finally, final_clock =  raw_clock / (1 + MULT / DIV)
-
-    info!("Flexcomm clock");
-    SYSCON.flexfrgctrl(2).modify(|w| {
-        w.set_div(0xFF);
-        w.set_mult(0);
+    // Configure SCTimer
+    SCT0.config().modify(|w| {
+        w.set_unify(sct0::vals::Unify::UNIFIED_COUNTER);
+        w.set_clkmode(sct0::vals::Clkmode::SYSTEM_CLOCK_MODE);
+        w.set_autolimit_l(true);
     });
 
-    info!("I2C Config");
-    // I2C configuration part
-    // FIFO Configuration
-
-    info!("Enabling DMA settings for USART");
-    USART2.fifocfg().modify(|w| {
-        w.set_dmarx(true);
-        w.set_dmatx(true);
-        // w.set_waketx(true);
-        // w.set_wakerx(true);
+    SCT0.match0().modify(|w| {
+        w.set_matchn_l((TOP << 16) as u16);
+        w.set_matchn_h((TOP >> 16) as u16);
     });
 
-    // USART Interrupts
-    /* usart.intenset.modify(|_, w| {
-        w.framerren()
-            .set_bit()
-            .parityerren()
-            .set_bit()
-            .rxnoiseen()
-            .set_bit()
-            .aberren()
-            .set_bit()
-    });*/
-
-    // Enable FIFO and USART
-
-    info!("After all settings, enable fifo");
-    USART2.fifocfg().modify(|w| {
-        w.set_enablerx(true);
-        w.set_enabletx(true);
+    SCT0.matchrel0().modify(|w| {
+        w.set_reloadn_l((TOP << 16) as u16);
+        w.set_reloadn_h((TOP >> 16) as u16);
     });
 
-    info!("Enable USART");
-    USART2.cfg().modify(|w| {
-        w.set_enable(true);
+    // The actual matches
+
+    SCT0.match1().modify(|w| {
+        let value: u32 = TOP / DUTY_CYCLE;
+        w.set_matchn_l((value << 16) as u16);
+        w.set_matchn_h((value >> 16) as u16);
     });
 
-    for _ in 0..200_000 {
-        nop();
-    }
+    SCT0.matchrel1().modify(|w| {
+        let value: u32 = TOP / DUTY_CYCLE;
+        w.set_reloadn_l((value << 16) as u16);
+        w.set_reloadn_h((value >> 16) as u16);
+    });
 
-    // FIFO Interrupts
+    SCT0.match2().modify(|w| {
+        w.set_matchn_l(0);
+        w.set_matchn_h(0);
+    });
+
+    SCT0.matchrel2().modify(|w| {
+        w.set_reloadn_l(0);
+        w.set_reloadn_h(0);
+    });
+
+    // Events
+
+    SCT0.ev(0).ev_ctrl().modify(|w| {
+        w.set_matchsel(2);
+        w.set_combmode(sct0::vals::Combmode::MATCH);
+    });
+    SCT0.ev(1).ev_ctrl().modify(|w| {
+        w.set_matchsel(1);
+        w.set_combmode(sct0::vals::Combmode::MATCH);
+    });
+
+    SCT0.out()
 }
 
 #[embassy_executor::main]

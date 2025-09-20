@@ -8,8 +8,8 @@ use nxp_pac::*;
 use {defmt_rtt as _, panic_halt as _};
 
 // const DIVIDER: u8 = 96;
-const DUTY_CYCLE: u32 = 50;
-const TOP: u32 = u32::MAX;
+const DUTY_CYCLE: u32 = 20;
+const TOP: u32 = u32::max_value();
 const OUTPUT_PIN: usize = 1;
 
 fn init() {
@@ -54,15 +54,27 @@ fn init() {
         w.set_autolimit_l(true);
     });
 
+    
+
     SCT0.match0().modify(|w| {
         w.set_matchn_l((TOP & 0xFFFF) as u16);
         w.set_matchn_h((TOP >> 16) as u16);
     });
 
-    SCT0.matchrel0().modify(|w| {
-        w.set_reloadn_l((TOP << 16) as u16);
-        w.set_reloadn_h((TOP >> 16) as u16);
+    SCT0.match2().modify(|w| {
+        w.set_matchn_l(0);
+        w.set_matchn_h(0);
     });
+
+    // SCT0.matchrel0().modify(|w| {
+    // w.set_reloadn_l((TOP & 0xFFFF) as u16);
+    // w.set_reloadn_h((TOP >> 16) as u16);
+    // });
+
+    // SCT0.matchrel0().modify(|w| {
+    //     w.set_reloadn_l((TOP << 16) as u16);
+    //     w.set_reloadn_h((TOP >> 16) as u16);
+    // });
 
     // The actual matches
 
@@ -90,6 +102,8 @@ fn init() {
 
     // Events
 
+    
+
     SCT0.ev(0).ev_ctrl().modify(|w| {
         w.set_matchsel(2);
         w.set_combmode(sct0::vals::Combmode::MATCH);
@@ -103,17 +117,23 @@ fn init() {
         w.set_statev(0);
     });
 
+    SCT0.start().modify(|w| w.set_startmsk_l(1 << 0));
+
+    SCT0.halt().modify(|w| {
+        w.set_haltmsk_l(0);
+    });
+
     SCT0.ev(0).ev_state().modify(|w| w.set_statemskn(1 << 0));
     SCT0.ev(1).ev_state().modify(|w| w.set_statemskn(1 << 0));
 
-    SCT0.out(1).out_set().modify(|w| w.set_set(1 << 0));
-    SCT0.out(1).out_clr().modify(|w| w.set_clr(1 << 1));
+    SCT0.out(OUTPUT_PIN).out_set().modify(|w| w.set_set(1 << 0));
+    SCT0.out(OUTPUT_PIN).out_clr().modify(|w| w.set_clr(1 << 1));
 
     SCT0.state().modify(|w| w.set_state_l(0));
 
     SCT0.ctrl().modify(|w| {
         w.set_clrctr_l(true);
-        w.set_stop_l(false);
+        w.set_halt_l(false);
     });
 }
 
@@ -123,6 +143,10 @@ async fn main(_spawner: Spawner) {
 
     info!("Inside the main function");
     loop {
-        nop();
+        info!("Lower bits {:b}", SCT0.count().read().ctr_l());
+        info!("Upper bits {:b}", SCT0.count().read().ctr_h());
+        for _ in 0..100_000{
+            nop();
+        }
     }
 }

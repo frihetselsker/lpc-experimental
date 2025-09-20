@@ -9,7 +9,8 @@ use {defmt_rtt as _, panic_halt as _};
 
 // const DIVIDER: u8 = 96;
 const DUTY_CYCLE: u32 = 50;
-const TOP: u32 = 0xFFFF;
+const TOP: u32 = u32::MAX;
+const OUTPUT_PIN: usize = 1;
 
 fn init() {
     info!("Initialization");
@@ -54,7 +55,7 @@ fn init() {
     });
 
     SCT0.match0().modify(|w| {
-        w.set_matchn_l((TOP << 16) as u16);
+        w.set_matchn_l((TOP & 0xFFFF) as u16);
         w.set_matchn_h((TOP >> 16) as u16);
     });
 
@@ -66,39 +67,54 @@ fn init() {
     // The actual matches
 
     SCT0.match1().modify(|w| {
-        let value: u32 = TOP / DUTY_CYCLE;
-        w.set_matchn_l((value << 16) as u16);
+        let value: u32 = (TOP / 100) * DUTY_CYCLE;
+        w.set_matchn_l((value & 0xFFFF) as u16);
         w.set_matchn_h((value >> 16) as u16);
     });
 
-    SCT0.matchrel1().modify(|w| {
-        let value: u32 = TOP / DUTY_CYCLE;
-        w.set_reloadn_l((value << 16) as u16);
-        w.set_reloadn_h((value >> 16) as u16);
-    });
+    // SCT0.matchrel1().modify(|w| {
+    //     let value: u32 = (TOP / 100) * DUTY_CYCLE;
+    //     w.set_reloadn_l((value << 16) as u16);
+    //     w.set_reloadn_h((value >> 16) as u16);
+    // });
 
     SCT0.match2().modify(|w| {
         w.set_matchn_l(0);
         w.set_matchn_h(0);
     });
 
-    SCT0.matchrel2().modify(|w| {
-        w.set_reloadn_l(0);
-        w.set_reloadn_h(0);
-    });
+    // SCT0.matchrel2().modify(|w| {
+    //     w.set_reloadn_l(0);
+    //     w.set_reloadn_h(0);
+    // });
 
     // Events
 
     SCT0.ev(0).ev_ctrl().modify(|w| {
         w.set_matchsel(2);
         w.set_combmode(sct0::vals::Combmode::MATCH);
+        w.set_stateld(sct0::vals::Stateld::ADD);
+        w.set_statev(0);
     });
     SCT0.ev(1).ev_ctrl().modify(|w| {
         w.set_matchsel(1);
         w.set_combmode(sct0::vals::Combmode::MATCH);
+        w.set_stateld(sct0::vals::Stateld::ADD);
+        w.set_statev(0);
     });
 
-    SCT0.out()
+    SCT0.ev(0).ev_state().modify(|w| w.set_statemskn(1 << 0));
+    SCT0.ev(1).ev_state().modify(|w| w.set_statemskn(1 << 0));
+
+    SCT0.out(1).out_set().modify(|w| w.set_set(1 << 0));
+    SCT0.out(1).out_clr().modify(|w| w.set_clr(1 << 1));
+
+    SCT0.state().modify(|w| w.set_state_l(0));
+
+    SCT0.ctrl().modify(|w| {
+        w.set_clrctr_l(true);
+        w.set_stop_l(false);
+    });
 }
 
 #[embassy_executor::main]

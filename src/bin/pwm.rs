@@ -7,7 +7,7 @@ use embassy_executor::Spawner;
 use nxp_pac::*;
 use {defmt_rtt as _, panic_halt as _};
 
-const DUTY_CYCLE: u32 = 1;
+const DUTY_CYCLE: u32 = 10;
 const TOP: u32 = 200_000;
 const OUTPUT_PIN: usize = 1;
 
@@ -59,7 +59,7 @@ fn init() {
 
     // Match 0 will reset the timer using TOP value
 
-    SCT0.match0().modify(|w| {
+    SCT0.mtch(0).modify(|w| {
         w.set_matchn_l((TOP & 0xFFFF) as u16);
         w.set_matchn_h((TOP >> 16) as u16);
     });
@@ -67,14 +67,14 @@ fn init() {
     // It is OBLIGATORY to write the reload value
     // because after each limit match values are cleared
 
-    SCT0.matchrel0().modify(|w| {
+    SCT0.matchrel(0).modify(|w| {
         w.set_reloadn_l((TOP & 0xFFFF) as u16);
         w.set_reloadn_h((TOP >> 16) as u16);
     });
 
     // The actual matches that are used for event logic
 
-    SCT0.match1().modify(|w| {
+    SCT0.mtch(1).modify(|w| {
         let value: u32 = (TOP / 100) * DUTY_CYCLE;
         w.set_matchn_l((value & 0xFFFF) as u16);
         w.set_matchn_h((value >> 16) as u16);
@@ -82,20 +82,20 @@ fn init() {
 
     // Reload value is OBLIGATORY
 
-    SCT0.matchrel1().modify(|w| {
+    SCT0.matchrel(1).modify(|w| {
         let value: u32 = (TOP / 100) * DUTY_CYCLE;
         w.set_reloadn_l((value & 0xFFFF) as u16);
         w.set_reloadn_h((value >> 16) as u16);
     });
 
-    SCT0.match2().modify(|w| {
+    SCT0.mtch(2).modify(|w| {
         w.set_matchn_l(0);
         w.set_matchn_h(0);
     });
 
     // Reload value is OBLIGATORY
 
-    SCT0.matchrel2().modify(|w| {
+    SCT0.matchrel(2).modify(|w| {
         w.set_reloadn_l(0);
         w.set_reloadn_h(0);
     });

@@ -85,12 +85,12 @@ fn init() {
     // FlexcommFRG divider (div is 0xFF by default in the documentation meaning it can be divided by either 1 or 2)
     SYSCON.flexfrgctrl(7).modify(|w| {
         w.set_div(0xFF);
-        w.set_mult(1);
+        w.set_mult(0);
     });
 
     // SPI clock divider can go from 1 to 255
     SPI7.div().modify(|w| {
-        w.set_divval(1);
+        w.set_divval(255);
     });
     // Final Clock is 12 MHz
 
@@ -102,7 +102,7 @@ fn init() {
         w.set_cpha(spi::vals::Cpha::CHANGE);
         w.set_cpol(spi::vals::Cpol::LOW);
         w.set_loop_(false);
-        w.set_spol1(spi::vals::Spol1::LOW);
+        w.set_spol1(spi::vals::Spol1::HIGH);
     });
     SPI7.fifocfg().modify(|w| {
         w.set_dmatx(false);
@@ -115,15 +115,20 @@ fn init() {
 
     // Disabling RX is recommended in the documentation if you are not expecting to receive data
     SPI7.fifowr().write(|w| {
-        w.set_rxignore(spi::vals::Rxignore::IGNORE);
+        w.set_rxignore(spi::vals::Rxignore::READ);
     });
+}
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    init();
 
     loop {
         // Assert the SSEL you are transferring data to
         SPI7.fifowr()
             .write(|w| w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED));
 
-        for _ in 0..100_000 {
+        for _ in 0..5 {
             nop();
         }
 
@@ -132,27 +137,24 @@ fn init() {
             w.set_len(8); // !! IMPORTANT !! If length isn't specified data won't be shifted out
         });
 
-        for _ in 0..100_000 {
-            nop();
-        }
-
-        let fifostat = SPI7.fifostat().read();
-        info!("Tx full? {}", !fifostat.txnotfull());
-        info!("Tx level: {}", fifostat.txlvl());
-        info!("Tx empty? {}", fifostat.txempty());
-
         SPI7.fifowr().write(|w| {
             w.set_eot(true); // Mark end of transfer
             w.set_txssel1_n(spi::vals::Txssel1N::NOT_ASSERTED); // Deassert our SSEL
         });
 
+        // for _ in 0..100_000 {
+        //     nop();
+        // }
+
+        let fifostat = SPI7.fifostat().read();
+        info!("Tx full? {}", !fifostat.txnotfull());
+        info!("Tx level: {}", fifostat.txlvl());
+        info!("Tx empty? {}", fifostat.txempty());
+        info!("RX level: {}", fifostat.rxlvl());
+        info!("RX data: {}", SPI7.fiford().read().rxdata());
+
         for _ in 0..100_000 {
             nop();
         }
     }
-}
-
-#[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    init();
 }

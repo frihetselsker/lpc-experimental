@@ -90,13 +90,12 @@ fn init() {
 
     // SPI clock divider can go from 1 to 255
     SPI7.div().modify(|w| {
-        w.set_divval(255);
+        w.set_divval(0);
     });
     // Final Clock is 12 MHz
 
     // SPI Master config using ssel_1
     SPI7.cfg().modify(|w| {
-        w.set_enable(true);
         w.set_master(spi::vals::Master::MASTER_MODE);
         w.set_lsbf(spi::vals::Lsbf::STANDARD);
         w.set_cpha(spi::vals::Cpha::CHANGE);
@@ -113,47 +112,57 @@ fn init() {
         // w.set_emptyrx(true);
     });
 
-    // Disabling RX is recommended in the documentation if you are not expecting to receive data
-    SPI7.fifowr().write(|w| {
-        w.set_rxignore(spi::vals::Rxignore::READ);
-    });
+    // Finally, enable the device
+    SPI7.cfg().modify(|w| w.set_enable(true));
 }
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init();
 
+    let mut data = [0u16; 8];
+
     loop {
         // Assert the SSEL you are transferring data to
-        SPI7.fifowr()
-            .write(|w| w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED));
+        // SPI7.fifowr().write(|w| {
+        //     w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
+        //     w.set_len(0xF); // !! IMPORTANT !! If length isn't specified data won't be shifted out
+        // });
 
-        for _ in 0..5 {
-            nop();
+        info!("Start of transfer");
+        let mut counter: u8 = 0;
+        // info!("Is slave asserted? {}", SPI7.stat().read().ssa());
+        for d in &mut data {
+            SPI7.fifowr().write(|w| {
+                w.set_txdata(45545); // Data to be transferred
+                w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
+                w.set_len(7);
+                if counter == 7 {
+                    w.set_eot(true);
+                }
+            });
+            while !SPI7.fifostat().read().rxnotempty() {
+                nop();
+            }
+            *d = SPI7.fiford().read().rxdata();
+            info!(
+                "Slave 1 is selected or not: {}",
+                SPI7.fifordnopop().read().rxssel1_n()
+            ); // ! is put here because the corresponding polarity has been set.
+            info!("Data read: {}", *d);
+            counter += 1;
         }
 
-        SPI7.fifowr().write(|w| {
-            w.set_txdata(0x04); // Data to be transferred
-            w.set_len(8); // !! IMPORTANT !! If length isn't specified data won't be shifted out
-        });
+        info!("The array content is {}", data);
 
-        SPI7.fifowr().write(|w| {
-            w.set_eot(true); // Mark end of transfer
-            w.set_txssel1_n(spi::vals::Txssel1N::NOT_ASSERTED); // Deassert our SSEL
-        });
+        // let fifostat = SPI7.fifostat().read();
+        // info!("Tx full? {}", !fifostat.txnotfull());
+        // info!("Tx level: {}", fifostat.txlvl());
+        // info!("Tx empty? {}", fifostat.txempty());
+        // info!("RX level: {}", fifostat.rxlvl());
+        // info!("RX data: {}", SPI7.fiford().read().rxdata());
 
-        // for _ in 0..100_000 {
-        //     nop();
-        // }
-
-        let fifostat = SPI7.fifostat().read();
-        info!("Tx full? {}", !fifostat.txnotfull());
-        info!("Tx level: {}", fifostat.txlvl());
-        info!("Tx empty? {}", fifostat.txempty());
-        info!("RX level: {}", fifostat.rxlvl());
-        info!("RX data: {}", SPI7.fiford().read().rxdata());
-
-        for _ in 0..100_000 {
+        for _ in 0..1_000_000 {
             nop();
         }
     }

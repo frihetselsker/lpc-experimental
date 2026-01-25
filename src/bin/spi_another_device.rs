@@ -9,6 +9,8 @@ use embassy_executor::Spawner;
 use nxp_pac::*;
 use {defmt_rtt as _, panic_halt as _};
 
+const REG_ADDRESS: u8 = 0x75;
+
 fn init() {
     info!("Init");
 
@@ -120,13 +122,55 @@ fn init() {
     SPI7.cfg().modify(|w| w.set_enable(true));
 }
 
+// pub fn blocking_transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
+//         let p = self.inner.regs();
+//         let len = read.len().max(write.len());
+//         for i in 0..len {
+//             let wb = write.get(i).copied().unwrap_or(0);
+//             while !p.sr().read().tnf() {}
+//             p.dr().write(|w| w.set_data(wb as _));
+//             while !p.sr().read().rne() {}
+//             let rb = p.dr().read().data() as u8;
+//             if let Some(r) = read.get_mut(i) {
+//                 *r = rb;
+//             }
+//         }
+//         self.flush()?;
+//         Ok(())
+//     }
+
+pub fn blocking_transfer(read: &mut [u8], write: &[u8]) {
+    let len = read.len().max(write.len());
+    let mut counter: u8 = 0;
+    for i in 0..len {
+        let wb = write.get(i).copied().unwrap_or(0);
+        SPI7.fifowr().write(|w| {
+            w.set_txdata(wb as u16); // Data to be transferred
+            w.set_len(0x7); // 8bit length
+            w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
+            if counter == len as u8 - 1 {
+                w.set_eot(true);
+                // GPIO.set(1).write(|w| w.set_setp(1 << 20));
+            }
+        });
+        while !SPI7.fifostat().read().rxnotempty() {}
+        let rb = SPI7.fiford().read().rxdata();
+        info!("Data read: {}", rb);
+        if let Some(r) = read.get_mut(i) {
+            *r = rb as u8;
+        }
+        counter += 1;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init();
     // Set up the GPIO pin to be active high
     // GPIO.set(1).write(|w| w.set_setp(1 << 20));
-    let mut data = [0u16; 8];
-
+    // let mut data = [0u16; 8];
+    let tx_data = [(1 << 7) | REG_ADDRESS, 0x00];
+    let mut rx_data = [0u8; 2];
     loop {
         // Assert the SSEL you are transferring data to
         // SPI7.fifowr().write(|w| {
@@ -135,42 +179,12 @@ async fn main(_spawner: Spawner) {
         // });
 
         info!("Start of transfer");
-        let mut counter: u8 = 0;
         // info!("Is slave asserted? {}", SPI7.stat().read().ssa());
         // GPIO.clr(1).write(|w| w.set_clrp(1 << 20));
-        let mut number: u16 = 25000;
 
-        for d in &mut data {
-            SPI7.fifowr().write(|w| {
-                w.set_txdata(number); // Data to be transferred
-                number += 1; // w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
-                w.set_len(0xf); // 8bit length
-                w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
-                if counter == 7 {
-                    w.set_eot(true);
-                    // GPIO.set(1).write(|w| w.set_setp(1 << 20));
-                }
-            });
-            while !SPI7.fifostat().read().rxnotempty() {
-                nop();
-            }
-            *d = SPI7.fiford().read().rxdata();
-            info!(
-                "Slave 1 is selected or not: {}",
-                SPI7.fifordnopop().read().rxssel1_n()
-            ); // ! is put here because the corresponding polarity has been set.
-            info!("Data read: {}", *d);
-            counter += 1;
-        }
+        blocking_transfer(&mut rx_data, &tx_data);
 
-        info!("The array content is {}", data);
-
-        // let fifostat = SPI7.fifostat().read();
-        // info!("Tx full? {}", !fifostat.txnotfull());
-        // info!("Tx level: {}", fifostat.txlvl());
-        // info!("Tx empty? {}", fifostat.txempty());
-        // info!("RX level: {}", fifostat.rxlvl());
-        // info!("RX data: {}", SPI7.fiford().read().rxdata());
+        info!("The array content is {}", rx_data);
 
         for _ in 0..1_000_000 {
             nop();

@@ -92,8 +92,6 @@ fn init() {
         .modify(|w| w.set_adcen(adc0::vals::Adcen::ADCEN_1));
 
     calibrate();
-
-    // TODO(frihetselsker): Finish startup and perform first ADC conversion
 }
 
 fn calibrate() {
@@ -108,9 +106,7 @@ fn calibrate() {
     let gain_a = ADC0.gcc(0).read().gain_cal();
     let gain_b = ADC0.gcc(1).read().gain_cal();
     // Fixed point efficiency
-    // I don't understand this formula.
-    // Why is it optimizing the calculation?
-    // How did he come up with this formula?
+    // More on https://kevinboone.me/rationalize.html
     let gcr_a = (((gain_a as u32) << 16) / (0x1FFFFu32 - gain_a as u32)) as u16;
     let gcr_b = (((gain_b as u32) << 16) / (0x1FFFFu32 - gain_b as u32)) as u16;
     ADC0.gcr(0).modify(|w| {

@@ -15,6 +15,9 @@ fn init() {
     // Enable iocon and flexcomm
     SYSCON.ahbclkctrl0().modify(|w| {
         w.set_iocon(true);
+        w.set_gpio0(true);
+        w.set_gpio1(true);
+        w.set_mux(true);
     });
     SYSCON.ahbclkctrl1().modify(|w| {
         w.set_fc(7, true);
@@ -44,13 +47,17 @@ fn init() {
 
     // SSEL1 at func 1 iocon
     IOCON.pio1(20).modify(|w| {
-        w.set_func(iocon::vals::PioFunc::ALT1);
+        w.set_func(iocon::vals::PioFunc::ALT0);
         w.set_digimode(iocon::vals::PioDigimode::DIGITAL);
         w.set_slew(iocon::vals::PioSlew::STANDARD);
         w.set_mode(iocon::vals::PioMode::INACTIVE);
         w.set_invert(false);
         w.set_od(iocon::vals::PioOd::NORMAL);
     });
+
+    GPIO.dirset(1).write(|w| w.set_dirsetp(1 << 20));
+
+    cs_set_high();
 
     // MOSI at func 7 iocon
     IOCON.pio0(20).modify(|w| {
@@ -90,19 +97,26 @@ fn init() {
 
     // SPI clock divider can go from 1 to 255
     SPI7.div().modify(|w| {
-        w.set_divval(0);
+        w.set_divval(1);
     });
     // Final Clock is 12 MHz
 
+    SPI7.fifocfg().modify(|w| {
+        w.set_enablerx(false);
+        w.set_enabletx(false);
+    });
     // SPI Master config using ssel_1
     SPI7.cfg().modify(|w| {
+        w.set_enable(false);
         w.set_master(spi::vals::Master::MASTER_MODE);
         w.set_lsbf(spi::vals::Lsbf::STANDARD);
-        w.set_cpha(spi::vals::Cpha::CHANGE);
-        w.set_cpol(spi::vals::Cpol::LOW);
+        w.set_cpha(spi::vals::Cpha::CAPTURE); // CPHA = 0 CAPTURE = 0, CHANGE = 1
+        w.set_cpol(spi::vals::Cpol::LOW); // CPOL = 0
         w.set_loop_(false);
-        w.set_spol1(spi::vals::Spol1::HIGH);
+        //w.set_spol1(spi::vals::Spol1::LOW);
     });
+
+    
     SPI7.fifocfg().modify(|w| {
         w.set_dmatx(false);
         w.set_dmarx(false);
@@ -116,51 +130,36 @@ fn init() {
     SPI7.cfg().modify(|w| w.set_enable(true));
 }
 
+fn cs_set_high() {
+    GPIO.set(1).write(|w| w.set_setp(1 << 20));
+}
+
+fn cs_set_low() {
+    GPIO.clr(1).write(|w| w.set_clrp(1 << 20));
+}
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init();
 
-    let mut data = [0u16; 8];
+    let data: [u8; 2] = [28, 06];
 
     loop {
-        // Assert the SSEL you are transferring data to
-        // SPI7.fifowr().write(|w| {
-        //     w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
-        //     w.set_len(0xF); // !! IMPORTANT !! If length isn't specified data won't be shifted out
-        // });
-
         info!("Start of transfer");
-        let mut counter: u8 = 0;
-        // info!("Is slave asserted? {}", SPI7.stat().read().ssa());
-        for d in &mut data {
+        cs_set_low();
+        for (i, d) in data.iter().enumerate() {
             SPI7.fifowr().write(|w| {
-                w.set_txdata(45545); // Data to be transferred
-                w.set_txssel1_n(spi::vals::Txssel1N::ASSERTED);
+                w.set_rxignore(spi::vals::Rxignore::IGNORE);
+                w.set_txdata(*d as u16); // Data to be transferred
                 w.set_len(7);
-                if counter == 7 {
-                    w.set_eot(true);
-                }
             });
-            while !SPI7.fifostat().read().rxnotempty() {
-                nop();
-            }
-            *d = SPI7.fiford().read().rxdata();
-            info!(
-                "Slave 1 is selected or not: {}",
-                SPI7.fifordnopop().read().rxssel1_n()
-            ); // ! is put here because the corresponding polarity has been set.
-            info!("Data read: {}", *d);
-            counter += 1;
         }
+        cs_set_high();
 
-        info!("The array content is {}", data);
-
-        // let fifostat = SPI7.fifostat().read();
-        // info!("Tx full? {}", !fifostat.txnotfull());
-        // info!("Tx level: {}", fifostat.txlvl());
-        // info!("Tx empty? {}", fifostat.txempty());
-        // info!("RX level: {}", fifostat.rxlvl());
-        // info!("RX data: {}", SPI7.fiford().read().rxdata());
+    let tx_level = SPI7.fifostat().read().txlvl();
+    let rx_level = SPI7.fifostat().read().rxlvl();
+    info!("Current TX level after transfer: {}", tx_level);
+    info!("Current RX level after transfer: {}", rx_level);
 
         for _ in 0..1_000_000 {
             nop();

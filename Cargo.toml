@@ -16,7 +16,7 @@ defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 panic-semihosting = "0.6.0"
 nxp-pac = { version = "0.1.0", features = ["lpc55s69_cm33_core0"], git = "https://github.com/frihetselsker/nxp-pac", rev = "5f0088907ee2c78c2e4179d05a49de8360d60d55"}
-embassy-hal-internal = { version = "0.3.0", path = "../embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
+embassy-hal-internal = { version = "0.4.0", path = "../embassy/embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
 portable-atomic = "1.11.1"
 
 [features]

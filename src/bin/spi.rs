@@ -7,6 +7,10 @@ use embassy_executor::Spawner;
 use nxp_pac::*;
 use {defmt_rtt as _, panic_halt as _};
 
+pub enum Error {
+
+}
+
 fn init() {
     info!("Init");
 
@@ -138,6 +142,73 @@ fn cs_set_low() {
     GPIO.clr(1).write(|w| w.set_clrp(1 << 20));
 }
 
+pub fn flush() {
+    while !SPI7.fifostat().read().txempty(){}
+}
+
+pub fn blocking_write(data: &[u8]) -> Result<(), Error> {
+    for d in data {
+            while !SPI7.fifostat().read().txnotfull(){}
+            SPI7.fifowr().write(|w| {
+                w.set_rxignore(spi::vals::Rxignore::IGNORE);
+                w.set_txdata(*d as u16); // Data to be transferred
+                w.set_len(7);
+            });
+    }
+    flush();
+    Ok(())
+}
+
+pub fn blocking_read(data: &mut [u8]) -> Result<(), Error> {
+    for d in data {
+        while !SPI7.fifostat().read().txnotfull(){}
+        SPI7.fifowr().write(|w| {
+            w.set_rxignore(spi::vals::Rxignore::READ);
+            w.set_txdata(0u16); // Data to be transferred
+            w.set_len(7);
+        });
+        while !SPI7.fifostat().read().rxnotempty(){}
+        *d = SPI7.fiford().read().rxdata() as u8;
+    }
+
+    Ok(())
+}
+
+pub fn blocking_transfer(read: &mut [u8], write: &[u8]) -> Result<(), Error> {
+    let len = read.len().max(write.len());
+    for i in 0..len {
+        let wb = write.get(i).copied().unwrap_or(0);
+        while !SPI7.fifostat().read().txnotfull() {}
+        SPI7.fifowr().write(|w| {
+            w.set_rxignore(spi::vals::Rxignore::READ);
+            w.set_txdata(wb as u16); // Data to be transferred
+            w.set_len(7);
+        });
+        while !SPI7.fifostat().read().rxnotempty(){}
+        let rb = SPI7.fiford().read().rxdata() as u8;
+        if let Some(r) = read.get_mut(i) {
+            *r = rb;
+        }
+    }
+    flush();
+    Ok(())
+}
+
+pub fn blocking_transfer_in_place(data: &mut [u8]) -> Result<(), Error> {
+    for d in data {
+        while !SPI7.fifostat().read().txnotfull() {}
+        SPI7.fifowr().write(|w| {
+            w.set_rxignore(spi::vals::Rxignore::READ);
+            w.set_txdata(*d as u16); // Data to be transferred
+            w.set_len(7);
+        });
+        while !SPI7.fifostat().read().rxnotempty(){}
+        *d = SPI7.fiford().read().rxdata() as u8;
+    }
+    flush();
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     init();
@@ -156,10 +227,10 @@ async fn main(_spawner: Spawner) {
         }
         cs_set_high();
 
-    let tx_level = SPI7.fifostat().read().txlvl();
-    let rx_level = SPI7.fifostat().read().rxlvl();
-    info!("Current TX level after transfer: {}", tx_level);
-    info!("Current RX level after transfer: {}", rx_level);
+        let tx_level = SPI7.fifostat().read().txlvl();
+        let rx_level = SPI7.fifostat().read().rxlvl();
+        info!("Current TX level after transfer: {}", tx_level);
+        info!("Current RX level after transfer: {}", rx_level);
 
         for _ in 0..1_000_000 {
             nop();
